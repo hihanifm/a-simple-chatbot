@@ -38,6 +38,7 @@ restart:
 	docker compose --profile dev up -d
 
 logs:
+	@echo "  App running at: http://localhost:8601"
 	docker compose --profile dev logs -f
 
 ps:

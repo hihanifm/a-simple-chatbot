@@ -4,7 +4,7 @@ import openai
 
 BACKENDS = {
     "Ollama": {
-        "default_url": "http://localhost:11434/v1",
+        "default_url": "http://host.docker.internal:11434/v1",
         "default_model": "llama3",
         "default_key": "ollama",
     },
