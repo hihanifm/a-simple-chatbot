@@ -1,4 +1,5 @@
 import os
+import time
 import streamlit as st
 import openai
 
@@ -66,9 +67,85 @@ with st.sidebar:
             model = st.text_input("Model", value=cfg["default_model"])
     st.session_state.selected_model = model
 
+    st.divider()
+    st.subheader("Request params")
+    temperature = st.slider("Temperature", 0.0, 2.0, 1.0, step=0.1)
+    max_tokens = int(st.number_input("Max tokens", min_value=1, value=2048))
+    system_prompt = st.text_area("System prompt", placeholder="Optional system message…")
+
+    st.divider()
     if st.button("Clear chat"):
         st.session_state.messages = []
         st.rerun()
+
+
+def render_details(stats):
+    with st.expander("Details"):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Request**")
+            st.json({
+                "base_url": stats.get("req_base_url"),
+                "model": stats.get("req_model"),
+                "temperature": stats.get("req_temperature"),
+                "max_tokens": stats.get("req_max_tokens"),
+                "system_prompt": stats.get("req_system_prompt"),
+                "messages_in_context": stats.get("req_message_count"),
+            })
+        with col2:
+            st.markdown("**Response**")
+            usage = stats.get("usage")
+            total_time = stats.get("total_time")
+            tps = (
+                round(usage["completion_tokens"] / total_time, 1)
+                if usage and total_time
+                else None
+            )
+            st.json({
+                "id": stats.get("resp_id"),
+                "model": stats.get("resp_model"),
+                "finish_reason": stats.get("finish_reason"),
+                "usage": usage,
+                "ttft_s": round(stats["ttft"], 3) if stats.get("ttft") else None,
+                "total_time_s": round(total_time, 3) if total_time else None,
+                "tokens_per_sec": tps,
+            })
+
+
+def stream_response(client, messages, model, temperature, max_tokens, stats):
+    t_start = time.time()
+    first_token = True
+    with client.chat.completions.create(
+        model=model,
+        messages=messages,
+        stream=True,
+        stream_options={"include_usage": True},
+        temperature=temperature,
+        max_tokens=max_tokens,
+    ) as stream:
+        for chunk in stream:
+            if chunk.choices:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    if first_token:
+                        stats["ttft"] = time.time() - t_start
+                        first_token = False
+                    yield delta
+                if chunk.choices[0].finish_reason:
+                    stats["finish_reason"] = chunk.choices[0].finish_reason
+            if chunk.usage:
+                u = chunk.usage
+                stats["usage"] = {
+                    "prompt_tokens": u.prompt_tokens,
+                    "completion_tokens": u.completion_tokens,
+                    "total_tokens": u.total_tokens,
+                }
+            if chunk.model:
+                stats["resp_model"] = chunk.model
+            if chunk.id:
+                stats["resp_id"] = chunk.id
+    stats["total_time"] = time.time() - t_start
+
 
 # --- Chat state ---
 if "messages" not in st.session_state:
@@ -78,6 +155,8 @@ if "messages" not in st.session_state:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+    if msg["role"] == "assistant" and msg.get("stats"):
+        render_details(msg["stats"])
 
 # --- Input ---
 if prompt := st.chat_input("Type a message…"):
@@ -92,28 +171,31 @@ if prompt := st.chat_input("Type a message…"):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    client = openai.OpenAI(
-        base_url=base_url,
-        api_key=api_key or "none",
-    )
+    api_messages = []
+    if system_prompt:
+        api_messages.append({"role": "system", "content": system_prompt})
+    api_messages += [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
 
-    def stream_response():
-        with client.chat.completions.create(
-            model=model,
-            messages=st.session_state.messages,
-            stream=True,
-        ) as stream:
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    yield delta
+    client = openai.OpenAI(base_url=base_url, api_key=api_key or "none")
+
+    stats = {
+        "req_base_url": base_url,
+        "req_model": model,
+        "req_temperature": temperature,
+        "req_max_tokens": max_tokens,
+        "req_system_prompt": system_prompt or None,
+        "req_message_count": len(api_messages),
+    }
 
     with st.chat_message("assistant"):
         try:
-            response = st.write_stream(stream_response())
+            response = st.write_stream(
+                stream_response(client, api_messages, model, temperature, max_tokens, stats)
+            )
         except Exception as e:
             st.error(f"Error: {e}")
             response = None
 
     if response:
-        st.session_state.messages.append({"role": "assistant", "content": response})
+        st.session_state.messages.append({"role": "assistant", "content": response, "stats": stats})
+        render_details(stats)
