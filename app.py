@@ -10,7 +10,7 @@ BACKENDS = {
         "default_key": "ollama",
     },
     "Internal": {
-        "default_url": os.environ.get("INTERNAL_LLM_URL", ""),
+        "default_url": os.environ.get("INTERNAL_LLM_URL", "http://host.docker.internal:35700/v1"),
         "default_model": "",
         "default_key": "",
     },
