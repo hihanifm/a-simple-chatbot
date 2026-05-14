@@ -1,6 +1,10 @@
 .venv/
 __pycache__/
 *.pyc
+*.pyo
 .env
+.env.*
+!.env.example
 pip-cache/*.whl
 pip-cache/*.tar.gz
+.DS_Store
