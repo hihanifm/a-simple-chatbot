@@ -10,7 +10,7 @@ BACKENDS = {
         "default_key": "ollama",
     },
     "Internal": {
-        "default_url": os.environ.get("INTERNAL_LLM_URL", "http://host.docker.internal:35700/v1"),
+        "default_url": os.environ.get("INTERNAL_LLM_URL") or "http://host.docker.internal:35700/v1",
         "default_model": "",
         "default_key": "",
     },
@@ -32,9 +32,9 @@ with st.sidebar:
     if st.session_state.get("_last_backend") != backend:
         st.session_state.pop("fetched_models", None)
         st.session_state.pop("selected_model", None)
-        st.session_state["_last_backend"] = backend
+st.session_state["_last_backend"] = backend
 
-    base_url = st.text_input("Base URL", value=cfg["default_url"])
+    base_url = st.text_input("Base URL", value=cfg["default_url"], key=f"base_url_{backend}")
     api_key = st.text_input(
         "API Key", value=cfg["default_key"], type="password",
         help="Leave as 'ollama' for Ollama, blank if your server needs no key."
