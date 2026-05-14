@@ -32,7 +32,7 @@ with st.sidebar:
     if st.session_state.get("_last_backend") != backend:
         st.session_state.pop("fetched_models", None)
         st.session_state.pop("selected_model", None)
-st.session_state["_last_backend"] = backend
+        st.session_state["_last_backend"] = backend
 
     base_url = st.text_input("Base URL", value=cfg["default_url"], key=f"base_url_{backend}")
     api_key = st.text_input(
