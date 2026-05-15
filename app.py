@@ -29,6 +29,7 @@ with st.sidebar:
     st.header("Backend")
     backend = st.selectbox("Provider", list(BACKENDS.keys()))
     cfg = BACKENDS[backend]
+
     if st.session_state.get("_last_backend") != backend:
         st.session_state.pop("fetched_models", None)
         st.session_state.pop("selected_model", None)
@@ -45,8 +46,7 @@ with st.sidebar:
         help="Leave as 'ollama' for Ollama, blank if your server needs no key."
     )
 
-    fetch_clicked = st.button("⟳ Fetch available models", use_container_width=True)
-    if fetch_clicked:
+    if st.button("⟳ Fetch available models", use_container_width=True):
         if not base_url:
             st.warning("Enter a Base URL first.")
         else:
@@ -60,13 +60,11 @@ with st.sidebar:
 
     fetched = st.session_state.get("fetched_models")
     if fetched:
-            default_idx = 0
-            prev = st.session_state.get("selected_model", cfg["default_model"])
-            if prev in fetched:
-                default_idx = fetched.index(prev)
-            model = st.selectbox("Model", fetched, index=default_idx)
-        else:
-            model = st.text_input("Model", value=cfg["default_model"])
+        prev = st.session_state.get("selected_model", cfg["default_model"])
+        default_idx = fetched.index(prev) if prev in fetched else 0
+        model = st.selectbox("Model", fetched, index=default_idx)
+    else:
+        model = st.text_input("Model", value=cfg["default_model"])
     st.session_state.selected_model = model
 
     st.divider()
