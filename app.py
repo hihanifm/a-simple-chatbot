@@ -191,17 +191,12 @@ if prompt := st.chat_input("Type a message..."):
 
     with st.chat_message("assistant"):
         placeholder = st.empty()
+        placeholder.markdown("_Thinking..._")
         response = ""
         try:
-            gen = stream_response(client, api_messages, model, temperature, max_tokens, stats)
-            with st.spinner("Thinking..."):
-                first = next(gen, None)
-            if first is not None:
-                response = first
+            for token in stream_response(client, api_messages, model, temperature, max_tokens, stats):
+                response += token
                 placeholder.markdown(response + CURSOR)
-                for token in gen:
-                    response += token
-                    placeholder.markdown(response + CURSOR)
             placeholder.markdown(response)
         except Exception as e:
             placeholder.empty()
