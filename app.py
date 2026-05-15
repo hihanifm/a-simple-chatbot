@@ -21,6 +21,8 @@ BACKENDS = {
     },
 }
 
+CURSOR = "|"
+
 st.set_page_config(page_title="LLM Chatbot", page_icon="💬")
 st.title("💬 LLM Chatbot")
 
@@ -46,7 +48,7 @@ with st.sidebar:
         help="Leave as 'ollama' for Ollama, blank if your server needs no key."
     )
 
-    if st.button("⟳ Fetch available models", use_container_width=True):
+    if st.button("Fetch available models", use_container_width=True):
         if not base_url:
             st.warning("Enter a Base URL first.")
         else:
@@ -71,7 +73,7 @@ with st.sidebar:
     st.subheader("Request params")
     temperature = st.slider("Temperature", 0.0, 2.0, 1.0, step=0.1)
     max_tokens = int(st.number_input("Max tokens", min_value=1, value=2048))
-    system_prompt = st.text_area("System prompt", placeholder="Optional system message…")
+    system_prompt = st.text_area("System prompt", placeholder="Optional system message...")
 
     st.divider()
     if st.button("Clear chat"):
@@ -159,7 +161,7 @@ for msg in st.session_state.messages:
         render_details(msg["stats"])
 
 # --- Input ---
-if prompt := st.chat_input("Type a message…"):
+if prompt := st.chat_input("Type a message..."):
     if not base_url:
         st.error("Set a Base URL in the sidebar first.")
         st.stop()
@@ -189,12 +191,12 @@ if prompt := st.chat_input("Type a message…"):
 
     with st.chat_message("assistant"):
         placeholder = st.empty()
-        placeholder.markdown("▌")
+        placeholder.markdown(CURSOR)
         response = ""
         try:
             for token in stream_response(client, api_messages, model, temperature, max_tokens, stats):
                 response += token
-                placeholder.markdown(response + "▌")
+                placeholder.markdown(response + CURSOR)
             placeholder.markdown(response)
         except Exception as e:
             placeholder.empty()
