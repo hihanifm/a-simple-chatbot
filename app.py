@@ -33,6 +33,11 @@ with st.sidebar:
         st.session_state.pop("fetched_models", None)
         st.session_state.pop("selected_model", None)
         st.session_state["_last_backend"] = backend
+        try:
+            _c = openai.OpenAI(base_url=cfg["default_url"], api_key=cfg["default_key"] or "none")
+            st.session_state.fetched_models = sorted(m.id for m in _c.models.list().data)
+        except Exception:
+            pass
 
     base_url = st.text_input("Base URL", value=cfg["default_url"], key=f"base_url_{backend}")
     api_key = st.text_input(
