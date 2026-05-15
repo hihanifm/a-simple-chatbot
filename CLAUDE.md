@@ -24,13 +24,22 @@ make logs                # tail logs (prints the URL as a reminder)
 
 `make` alone prints all available targets.
 
-## Key behaviour notes
+## app.py architecture
 
-- **Ollama default URL is `host.docker.internal:11434`** — correct for Docker. If running locally without Docker, change it to `localhost:11434` in the sidebar.
-- **Backend switch clears the fetched model list** — `_last_backend` in session state tracks this.
-- **`INTERNAL_LLM_URL` env var** pre-fills the Internal backend's Base URL field (still editable at runtime).
-- **API key defaults**: Ollama uses `"ollama"` (dummy required by the SDK); Internal/OpenAI default to blank.
-- The `⟳` button fetches `/v1/models` from the current base URL and replaces the model text input with a dropdown.
+All code is in one file. Key sections:
+
+- **`BACKENDS` dict** — default URL, model, and API key per provider. Internal URL falls back to `http://host.docker.internal:35700/v1` if `INTERNAL_LLM_URL` env var is unset or empty (use `or`, not `get()` default, because docker-compose sets it to empty string).
+- **Sidebar** — provider selectbox, base URL / API key inputs, "Fetch available models" button, request params (temperature, max_tokens, system prompt), clear chat. Switching provider auto-fetches models via `/v1/models` and clears prior model selection; `_last_backend` in session state tracks the current provider.
+- **`stream_response()` generator** — wraps `openai.OpenAI(base_url=...).chat.completions.create(stream=True)`. Captures TTFT, finish_reason, usage (via `stream_options={"include_usage": True}`), response id/model into a mutable `stats` dict passed by reference.
+- **Streaming display** — uses `st.empty()` placeholder showing `|` cursor until first token arrives, then appends tokens manually. Do NOT use `st.write_stream()` here — it doesn't support the pre-stream cursor.
+- **`render_details(stats)`** — collapsible expander showing request params (left col) and response metadata (right col): finish_reason, token counts, TTFT, total time, tokens/sec.
+- **`session_state.messages`** — list of `{role, content, stats}` dicts. `stats` is only present on assistant messages. System prompt is prepended to `api_messages` at send time but not stored in history.
+
+## Editing caution
+
+- Always verify syntax with `python3 -c "import ast; ast.parse(open('app.py').read())"` before committing.
+- Avoid Unicode characters (e.g. `▌`, `…`) in string literals — they cause SyntaxError inside the Docker Python environment.
+- When making changes to indentation-heavy blocks (sidebar `with st.sidebar:`, nested `if/else`), rewrite the full file rather than using surgical edits — incremental edits have repeatedly caused IndentationError.
 
 ## Docker port convention
 
@@ -39,8 +48,8 @@ make logs                # tail logs (prints the URL as a reminder)
 | dev     | 8601      |
 | prod    | 8600      |
 
-Both map to container port `8501` (Streamlit default). `extra_hosts: host-gateway` is set so containers can reach host-side services (Ollama) via `host.docker.internal` on both Mac and Linux.
+Both map to container port `8501`. `extra_hosts: host-gateway` lets containers reach host services via `host.docker.internal` on both Mac and Linux. `INTERNAL_LLM_URL` defaults to `http://host.docker.internal:35700/v1` in docker-compose if not set in the environment.
 
 ## pip-cache
 
-`pip-cache/` holds pre-downloaded wheels for offline builds. The directory is tracked (`.gitkeep`); the wheels themselves are gitignored. Run `make pip-cache` to populate for the current arch.
+`pip-cache/` holds pre-downloaded wheels for offline builds. Directory is tracked (`.gitkeep`); wheels are gitignored. Run `make pip-cache` to populate for the current arch.
