@@ -77,7 +77,6 @@ with st.sidebar:
     system_prompt = st.text_area("System prompt", placeholder="Optional system message...")
 
     st.divider()
-    st.caption(f"v{VERSION}")
     if st.button("Clear chat"):
         st.session_state.messages = []
         st.rerun()
@@ -208,3 +207,33 @@ if prompt := st.chat_input("Type a message..."):
     if response:
         st.session_state.messages.append({"role": "assistant", "content": response, "stats": stats})
         render_details(stats)
+
+# --- Bottom bar ---
+_status_color = "#22c55e" if st.session_state.get("fetched_models") else "#94a3b8"
+_status_label = "online" if st.session_state.get("fetched_models") else "unknown"
+_display_url = base_url[:40] + "..." if len(base_url) > 40 else base_url
+st.markdown(f"""
+<style>
+.bottom-bar {{
+    position: fixed; bottom: 0; left: 0; right: 0;
+    height: 30px; z-index: 30;
+    background: var(--background-color);
+    border-top: 1px solid rgba(128,128,128,0.2);
+    display: flex; align-items: center;
+    padding: 0 16px; gap: 14px;
+    font-size: 12px; opacity: 0.75;
+}}
+.bottom-bar .dot {{
+    width: 8px; height: 8px; border-radius: 50%;
+    background: {_status_color}; display: inline-block;
+}}
+.main .block-container {{ padding-bottom: 48px !important; }}
+</style>
+<div class="bottom-bar">
+    <strong>LLM Chatbot</strong>
+    <span>{backend}</span>
+    <span style="opacity:0.6">{_display_url}</span>
+    <span><span class="dot"></span>&nbsp;{_status_label}</span>
+    <span style="margin-left:auto; opacity:0.5">v{VERSION}</span>
+</div>
+""", unsafe_allow_html=True)
