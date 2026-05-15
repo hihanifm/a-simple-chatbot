@@ -40,9 +40,7 @@ with st.sidebar:
         help="Leave as 'ollama' for Ollama, blank if your server needs no key."
     )
 
-    col1, col2 = st.columns([3, 1])
-    with col2:
-        fetch_clicked = st.button("⟳", help="Fetch available models from the server")
+    fetch_clicked = st.button("⟳ Fetch available models", use_container_width=True)
     if fetch_clicked:
         if not base_url:
             st.warning("Enter a Base URL first.")
@@ -56,8 +54,7 @@ with st.sidebar:
                 st.error(f"Could not fetch models: {e}")
 
     fetched = st.session_state.get("fetched_models")
-    with col1:
-        if fetched:
+    if fetched:
             default_idx = 0
             prev = st.session_state.get("selected_model", cfg["default_model"])
             if prev in fetched:
