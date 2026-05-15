@@ -22,6 +22,7 @@ BACKENDS = {
 }
 
 CURSOR = "|"
+VERSION = open(os.path.join(os.path.dirname(__file__), "VERSION")).read().strip()
 
 st.set_page_config(page_title="LLM Chatbot", page_icon="💬")
 st.title("💬 LLM Chatbot")
@@ -76,6 +77,7 @@ with st.sidebar:
     system_prompt = st.text_area("System prompt", placeholder="Optional system message...")
 
     st.divider()
+    st.caption(f"v{VERSION}")
     if st.button("Clear chat"):
         st.session_state.messages = []
         st.rerun()
