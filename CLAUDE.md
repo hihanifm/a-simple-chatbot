@@ -17,8 +17,7 @@ streamlit run app.py
 ## Running with Docker
 
 ```bash
-make build && make up    # dev — http://localhost:8601
-make prod-up             # prod — http://localhost:8600
+make build && make up    # http://localhost:8501
 make logs                # tail logs (prints the URL as a reminder)
 ```
 
@@ -50,15 +49,22 @@ Key sections in `app.py`:
 - Avoid Unicode characters (e.g. `▌`, `…`) in string literals — they cause SyntaxError inside the Docker Python environment.
 - When making changes to indentation-heavy blocks (sidebar `with st.sidebar:`, nested `if/else`), rewrite the full file rather than using surgical edits — incremental edits have repeatedly caused IndentationError.
 
-## Docker port convention
+## Docker
 
-| Profile | Host port |
-|---------|-----------|
-| dev     | 8601      |
-| prod    | 8600      |
-
-Both map to container port `8501`. `extra_hosts: host-gateway` lets containers reach host services via `host.docker.internal` on both Mac and Linux. `INTERNAL_LLM_URL` and `LAB_LLM_URL` are set in docker-compose when not in the environment. Dev compose mounts `app.py`, `llm_client.py`, and `lab_adapter_openai_reference.py`.
+Host and container both use port `8501`. `extra_hosts: host-gateway` lets the container reach host services via `host.docker.internal` on Mac and Linux. `INTERNAL_LLM_URL` and `LAB_LLM_URL` are set in docker-compose when not in the environment. Compose mounts `app.py`, `llm_client.py`, and `lab_adapter_openai_reference.py` for live edits.
 
 ## pip-cache
 
-`pip-cache/` holds pre-downloaded wheels for offline builds. Directory is tracked (`.gitkeep`); wheels are gitignored. Run `make pip-cache` to populate for the current arch.
+`pip-cache/` holds pre-downloaded wheels for offline Docker builds. The directory is tracked (`.gitkeep`); wheels are gitignored.
+
+On each machine **and arch** where you build the image (e.g. office Linux x86_64), run once while online:
+
+```bash
+cp .env.example .env   # set HTTP_PROXY, HTTPS_PROXY, NO_PROXY, PIP_INDEX_URL if needed
+make pip-cache
+make build
+```
+
+`make` loads `.env` and exports proxy vars for `pip-cache` and `docker compose build`. Use `PIP_INDEX_URL` if your lab uses an internal PyPI mirror instead of pypi.org. After `pip-cache` succeeds, `make build` can run offline (no PyPI in Docker).
+
+Wheels from a Mac (arm64) do not work on Linux (x86_64) — re-run `make pip-cache` on the office PC. If pip still fails behind SSL-inspecting proxies, ask IT for the corporate index URL and set `PIP_INDEX_URL` in `.env`.
