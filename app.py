@@ -478,8 +478,8 @@ def render_skills_trace(msg):
         for note in verdict.get("notes") or []:
             st.caption(note)
         st.json(summary)
-        if msg.get("tool_trace"):
-            st.caption("Full per-round payloads are in Tool trace below.")
+        if msg.get("tool_trace") or msg.get("api_trace"):
+            st.caption("Full per-round payloads are in API trace below.")
 
 
 def render_assistant_bubble(msg):
@@ -501,27 +501,94 @@ def render_assistant_bubble(msg):
         st.markdown("_No assistant text; see errors above._")
 
 
-def render_tool_trace(msg):
-    trace = msg.get("tool_trace")
+def build_chat_api_trace(
+    request_messages,
+    model,
+    temperature,
+    max_tokens,
+    stats,
+    content,
+    failures=None,
+    stream_summary=None,
+    error_response=None,
+):
+    round_failures = [
+        {"kind": f.get("kind"), "message": f.get("message")}
+        for f in (failures or [])
+    ]
+    entry = {
+        "round": 1,
+        "request": {
+            "messages": json.loads(json.dumps(request_messages)),
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        },
+        "round_failures": round_failures,
+    }
+    if error_response is not None:
+        entry["error_response"] = error_response
+        entry["response"] = None
+    else:
+        entry["response"] = {
+            "id": stats.get("resp_id"),
+            "model": stats.get("resp_model"),
+            "finish_reason": stats.get("finish_reason"),
+            "message": {"role": "assistant", "content": content},
+            "usage": stats.get("usage"),
+            "elapsed_s": round(stats.get("total_time") or 0, 3),
+            "ttft_s": round(stats["ttft"], 3) if stats.get("ttft") else None,
+        }
+    if stream_summary:
+        entry["stream_trace_summary"] = stream_summary
+    return [entry]
+
+
+def render_api_trace(msg):
+    trace = msg.get("tool_trace") or msg.get("api_trace")
     if not trace:
         return
-    verdict = msg.get("tool_verdict") or {}
-    failures = msg.get("tool_failures") or []
-    header_fail = "FAIL | " if verdict.get("failed") or failures else ""
-    checks = []
-    for key, label in [
-        ("accepts_tools", "accepts_tools"),
-        ("emitted_tool_calls", "emitted_tool_calls"),
-        ("valid_tool_names", "valid_tool_names"),
-        ("completed_after_tools", "completed_after_tools"),
-    ]:
-        val = verdict.get(key)
-        checks.append(f"{label} {'OK' if val else 'FAIL'}")
-    ref = verdict.get("referenced_mock_data")
-    checks.append(f"referenced_mock_data {'OK' if ref else 'heuristic FAIL'}")
-    with st.expander("Tool trace"):
-        st.markdown(f"**{header_fail}**" + " | ".join(checks))
-        for note in verdict.get("notes") or []:
+    stats = msg.get("stats") or {}
+    if msg.get("tool_trace"):
+        verdict = msg.get("tool_verdict") or {}
+        failures = msg.get("tool_failures") or []
+        header_fail = "FAIL | " if verdict.get("failed") or failures else ""
+        checks = []
+        for key, label in [
+            ("accepts_tools", "accepts_tools"),
+            ("emitted_tool_calls", "emitted_tool_calls"),
+            ("valid_tool_names", "valid_tool_names"),
+            ("completed_after_tools", "completed_after_tools"),
+        ]:
+            val = verdict.get(key)
+            checks.append(f"{label} {'OK' if val else 'FAIL'}")
+        ref = verdict.get("referenced_mock_data")
+        checks.append(f"referenced_mock_data {'OK' if ref else 'heuristic FAIL'}")
+        header = f"**{header_fail}**" + " | ".join(checks)
+        notes = verdict.get("notes") or []
+    elif stats.get("stream_verdict"):
+        header = f"**{format_stream_verdict_line(stats['stream_verdict'])}**"
+        notes = stats["stream_verdict"].get("notes") or []
+    else:
+        rnd = trace[0] if trace else {}
+        resp = rnd.get("response") or {}
+        usage = resp.get("usage") or {}
+        header = (
+            f"finish_reason={resp.get('finish_reason')} | "
+            f"elapsed_s={resp.get('elapsed_s')} | "
+            f"ttft_s={resp.get('ttft_s')}"
+        )
+        if usage:
+            header += (
+                f" | prompt_tokens={usage.get('prompt_tokens')} | "
+                f"completion_tokens={usage.get('completion_tokens')}"
+            )
+        notes = []
+    with st.expander("API trace"):
+        st.markdown(header)
+        for note in notes:
             st.caption(note)
         for rnd in trace:
             rn = rnd.get("round", "?")
@@ -538,6 +605,9 @@ def render_tool_trace(msg):
                 if rnd.get("tool_results") is not None:
                     st.markdown("**tool_results**")
                     st.json(rnd.get("tool_results"))
+                if rnd.get("stream_trace_summary") is not None:
+                    st.markdown("**stream_trace_summary**")
+                    st.json(rnd.get("stream_trace_summary"))
 
 
 def run_tool_chat(
@@ -873,56 +943,6 @@ with st.sidebar:
         st.rerun()
 
 
-def render_details(stats):
-    with st.expander("Details"):
-        verdict = stats.get("stream_verdict")
-        if verdict:
-            st.markdown(f"**{format_stream_verdict_line(verdict)}**")
-            for note in verdict.get("notes") or []:
-                st.caption(note)
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Request**")
-            st.json({
-                "base_url": stats.get("req_base_url"),
-                "model": stats.get("req_model"),
-                "temperature": stats.get("req_temperature"),
-                "max_tokens": stats.get("req_max_tokens"),
-                "system_prompt_sidebar": stats.get("req_system_prompt_sidebar"),
-                "system_prompt_base": stats.get("req_system_prompt_base"),
-                "system_prompt_sent": stats.get("req_system_prompt_sent"),
-                "user_prompt_last": stats.get("req_user_prompt_last"),
-                "messages_in_context": stats.get("req_message_count"),
-                "mock_tools": stats.get("mock_tools"),
-                "mock_skills": stats.get("mock_skills"),
-                "skills_probe_mode": stats.get("skills_probe_mode"),
-                "stream_test": stats.get("stream_test"),
-            })
-        with col2:
-            st.markdown("**Response**")
-            usage = stats.get("usage")
-            total_time = stats.get("total_time")
-            tps = (
-                round(usage["completion_tokens"] / total_time, 1)
-                if usage and total_time
-                else None
-            )
-            resp = {
-                "id": stats.get("resp_id"),
-                "model": stats.get("resp_model"),
-                "finish_reason": stats.get("finish_reason"),
-                "usage": usage,
-                "ttft_s": round(stats["ttft"], 3) if stats.get("ttft") else None,
-                "total_time_s": round(total_time, 3) if total_time else None,
-                "tokens_per_sec": tps,
-                "tool_rounds": stats.get("tool_rounds"),
-            }
-            summary = stats.get("stream_trace_summary")
-            if summary:
-                resp["stream_trace_summary"] = summary
-            st.json(resp)
-
-
 def stream_response(client, messages, model, temperature, max_tokens, stats, trace=None):
     t_start = time.time()
     first_token = True
@@ -971,13 +991,13 @@ def stream_response(client, messages, model, temperature, max_tokens, stats, tra
                     })
                 elif not truncated:
                     truncated = True
-    if trace is not None:
-        stats["stream_trace_summary"] = {
-            "chunk_count": chunk_count,
-            "content_chunks": content_chunks,
-            "truncated": truncated,
-            "samples": samples,
-        }
+    summary = {
+        "chunk_count": chunk_count,
+        "content_chunks": content_chunks,
+        "truncated": truncated if trace is not None else False,
+        "samples": samples,
+    }
+    stats["stream_trace_summary"] = summary
     stats["total_time"] = time.time() - t_start
 
 
@@ -993,12 +1013,10 @@ for msg in st.session_state.messages:
         else:
             st.markdown(msg["content"])
     if msg["role"] == "assistant":
-        if msg.get("tool_trace"):
-            render_tool_trace(msg)
+        if msg.get("tool_trace") or msg.get("api_trace"):
+            render_api_trace(msg)
         if msg.get("skills_trace"):
             render_skills_trace(msg)
-        if msg.get("stats"):
-            render_details(msg["stats"])
 
 # --- Input ---
 _pending = st.session_state.pop("pending_prompt", None)
@@ -1094,10 +1112,11 @@ if prompt:
             }
             render_assistant_bubble(bubble)
             if tool_trace:
-                render_tool_trace({
+                render_api_trace({
                     "tool_trace": tool_trace,
                     "tool_verdict": tool_verdict,
                     "tool_failures": tool_failures,
+                    "stats": stats,
                 })
             if enable_mock_skills and skills_trace:
                 render_skills_trace({
@@ -1120,7 +1139,6 @@ if prompt:
             msg_entry["skills_verdict"] = skills_verdict
             msg_entry["skills_failures"] = skills_failures
         st.session_state.messages.append(msg_entry)
-        render_details(stats)
     else:
         stream_failures = []
         trace = [] if enable_stream_test else None
@@ -1130,6 +1148,7 @@ if prompt:
             placeholder = st.empty()
             placeholder.markdown("_Thinking..._")
             response = ""
+            api_trace = None
             try:
                 for token in stream_response(
                     client, api_messages, model, temperature, max_tokens, stats, trace=trace
@@ -1144,14 +1163,36 @@ if prompt:
                         stats.get("stream_trace_summary"),
                         response,
                     )
+                api_trace = build_chat_api_trace(
+                    api_messages,
+                    model,
+                    temperature,
+                    max_tokens,
+                    stats,
+                    response,
+                    failures=stream_failures,
+                    stream_summary=stats.get("stream_trace_summary"),
+                )
             except Exception as e:
                 placeholder.empty()
                 st.error(f"Error: {e}")
+                body = getattr(e, "body", None)
+                add_failure(stream_failures, 0, "api_error", f"Error: {e}")
                 if enable_stream_test:
-                    add_failure(stream_failures, 0, "api_error", f"Error: {e}")
                     stats["stream_verdict"] = compute_stream_verdict(
                         stream_failures, stats, stats.get("stream_trace_summary"), None
                     )
+                api_trace = build_chat_api_trace(
+                    api_messages,
+                    model,
+                    temperature,
+                    max_tokens,
+                    stats,
+                    None,
+                    failures=stream_failures,
+                    stream_summary=stats.get("stream_trace_summary"),
+                    error_response=body,
+                )
                 response = None
 
         if response is not None:
@@ -1159,19 +1200,23 @@ if prompt:
                 "role": "assistant",
                 "content": response,
                 "stats": stats,
+                "api_trace": api_trace,
             }
             if enable_stream_test and stream_failures:
                 assistant_msg["stream_failures"] = stream_failures
             st.session_state.messages.append(assistant_msg)
-            render_details(stats)
-        elif enable_stream_test and stats.get("stream_verdict"):
-            st.session_state.messages.append({
+            render_api_trace(assistant_msg)
+        elif api_trace:
+            err_msg = {
                 "role": "assistant",
                 "content": None,
                 "stats": stats,
-                "stream_failures": stream_failures,
-            })
-            render_details(stats)
+                "api_trace": api_trace,
+            }
+            if stream_failures:
+                err_msg["stream_failures"] = stream_failures
+            st.session_state.messages.append(err_msg)
+            render_api_trace(err_msg)
 
 # --- Bottom bar ---
 _status_color = "#22c55e" if st.session_state.get("fetched_models") else "#94a3b8"
