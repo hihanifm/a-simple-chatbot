@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Download wheels into pip-cache/<uname -m>/ for the current machine arch.
+# Download wheels into pip-cache/<uname -m>/ (online; run once per machine arch).
+# Honors HTTP_PROXY / PIP_INDEX_URL from the environment if already set.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,20 +23,13 @@ case "$ARCH" in
     ;;
 esac
 
-TRUSTED=(
-  --trusted-host pypi.org
-  --trusted-host pypi.python.org
-  --trusted-host files.pythonhosted.org
-)
-
-INDEX=()
+EXTRA=()
 if [ -n "${PIP_INDEX_URL:-}" ]; then
-  INDEX=(-i "$PIP_INDEX_URL")
+  EXTRA+=(-i "$PIP_INDEX_URL")
 fi
 
 COMMON=(
-  "${INDEX[@]}"
-  "${TRUSTED[@]}"
+  "${EXTRA[@]}"
   --python-version 3.11
   --implementation cp
   --abi cp311
@@ -53,4 +47,9 @@ else
     || pip download "${COMMON[@]}"
 fi
 
-echo "Done. Wheels in $DEST"
+count="$(find "$DEST" -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l | tr -d ' ')"
+echo "Done. Wheels in $DEST ($count files)"
+if [ "$count" -lt 3 ]; then
+  echo "ERROR: expected more wheels; download may have failed" >&2
+  exit 1
+fi

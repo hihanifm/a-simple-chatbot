@@ -4,11 +4,6 @@ services:
       context: .
       args:
         PYTHON_IMAGE: ${PYTHON_IMAGE:-public.ecr.aws/docker/library/python:3.11-slim}
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,host.docker.internal}
-        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
-        HOST_ARCH: ${BUILD_ARCH:-}
     ports:
       - "8600:8501"
     volumes:

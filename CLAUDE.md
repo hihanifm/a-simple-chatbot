@@ -55,14 +55,12 @@ Docker maps host **8600** to container **8501** (Streamlit inside the image). Lo
 
 ## pip-cache
 
-`pip-cache/` holds pre-downloaded wheels for offline Docker builds. Wheels go under **`pip-cache/<arch>/`** where `<arch>` is `uname -m` (`x86_64`, `aarch64`, etc.). `make build` passes `BUILD_ARCH` into the image and uses that subfolder when present (falls back to a flat `pip-cache/` layout).
-
-On each machine where you build, run once while online:
+Docker **build never uses PyPI** — only wheels under `pip-cache/<uname -m>/` (e.g. `pip-cache/x86_64`).
 
 ```bash
-cp .env.example .env   # HTTP_PROXY, HTTPS_PROXY, NO_PROXY, PIP_INDEX_URL if needed
-make pip-cache         # detects arch, writes pip-cache/x86_64 or pip-cache/aarch64
-make build
+make pip-cache    # online once per machine arch
+make build        # offline; log must show: pip: OFFLINE install from /tmp/pip-cache/...
+make up
 ```
 
-`scripts/pip-cache-download.sh` picks pip `--platform` tags from the host arch and retries without `--only-binary` if wheels are missing. Mac and office Linux can each keep their own subfolder; you can copy only `pip-cache/x86_64/` to the office PC if needed.
+Proxy or `PIP_INDEX_URL` in the environment are honored for `make pip-cache` only if already set; `make build` does not need them. Copy `pip-cache/x86_64/` to office Linux or run `make pip-cache` there.
