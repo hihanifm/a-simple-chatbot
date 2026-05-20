@@ -59,7 +59,11 @@ TOOL_TEST_PROMPT = (
     "then summarize what you found in one paragraph."
 )
 STREAM_TEST_PROMPT = "Tell me a story."
-SKILLS_TEST_PROMPT = "Say ping."
+PROBE_BASE_SYSTEM_PROMPT = (
+    "You are a debugging and analysis assistant. Help the user investigate "
+    "issues clearly and follow any loaded agent skills."
+)
+SKILLS_TEST_PROMPT = "Hey, how do I ping?"
 LOAD_SKILL_TOOL = {
     "type": "function",
     "function": {
@@ -202,7 +206,10 @@ def referenced_marker(text):
     return bool(text and "[MOCK_SKILL:mock-ping]" in text)
 
 
-def build_effective_system_prompt(user_system, mode):
+def build_effective_system_prompt(user_system, mode=None):
+    base = (user_system or "").strip() or PROBE_BASE_SYSTEM_PROMPT
+    if mode is None:
+        return base
     if mode == "catalog_tool":
         skill = MOCK_SKILLS[0] if MOCK_SKILLS else {"name": "mock-ping", "description": ""}
         appendix = (
@@ -211,9 +218,7 @@ def build_effective_system_prompt(user_system, mode):
         )
     else:
         appendix = f"Loaded agent skill (mock-ping):\n{MOCK_SKILL_PING_MD}"
-    if user_system:
-        return user_system + "\n\n" + appendix
-    return appendix
+    return base + "\n\n" + appendix
 
 
 def get_probe_tools(enable_tools, enable_skills, skills_mode):
@@ -822,6 +827,9 @@ with st.sidebar:
         st.caption("Tools are fake; nothing runs on the host.")
     if enable_mock_skills:
         st.caption("Skills are bundled mock SKILL.md only.")
+        st.caption(
+            "Empty System prompt uses a default probe persona, then skills are appended."
+        )
     if enable_mock_tools or enable_mock_skills:
         with st.expander("Suggested test prompts"):
             if enable_mock_tools:
@@ -880,12 +888,14 @@ def render_details(stats):
                 "model": stats.get("req_model"),
                 "temperature": stats.get("req_temperature"),
                 "max_tokens": stats.get("req_max_tokens"),
-                "system_prompt": stats.get("req_system_prompt"),
+                "system_prompt_sidebar": stats.get("req_system_prompt_sidebar"),
+                "system_prompt_base": stats.get("req_system_prompt_base"),
+                "system_prompt_sent": stats.get("req_system_prompt_sent"),
+                "user_prompt_last": stats.get("req_user_prompt_last"),
                 "messages_in_context": stats.get("req_message_count"),
                 "mock_tools": stats.get("mock_tools"),
                 "mock_skills": stats.get("mock_skills"),
                 "skills_probe_mode": stats.get("skills_probe_mode"),
-                "req_system_prompt_effective": stats.get("req_system_prompt_effective"),
                 "stream_test": stats.get("stream_test"),
             })
         with col2:
@@ -1007,13 +1017,17 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    probe_mode = skills_probe_mode if enable_mock_skills else "catalog_tool"
-    effective_sys = (
-        build_effective_system_prompt(system_prompt, probe_mode)
-        if enable_mock_skills
-        else system_prompt
-    )
+    probe_mode = skills_probe_mode if enable_mock_skills else None
+    if enable_mock_skills:
+        effective_sys = build_effective_system_prompt(system_prompt, probe_mode)
+    elif enable_mock_tools:
+        effective_sys = build_effective_system_prompt(system_prompt, mode=None)
+    else:
+        effective_sys = system_prompt or None
     api_messages = build_api_messages(st.session_state.messages, effective_sys)
+    system_base = (system_prompt or "").strip() or (
+        PROBE_BASE_SYSTEM_PROMPT if (enable_mock_skills or enable_mock_tools) else None
+    )
 
     client = openai.OpenAI(base_url=base_url, api_key=api_key or "none")
 
@@ -1022,12 +1036,14 @@ if prompt:
         "req_model": model,
         "req_temperature": temperature,
         "req_max_tokens": max_tokens,
-        "req_system_prompt": system_prompt or None,
-        "req_system_prompt_effective": effective_sys if enable_mock_skills else None,
+        "req_system_prompt_sidebar": system_prompt or None,
+        "req_system_prompt_base": system_base,
+        "req_system_prompt_sent": effective_sys,
+        "req_user_prompt_last": prompt,
         "req_message_count": len(api_messages),
         "mock_tools": enable_mock_tools,
         "mock_skills": enable_mock_skills,
-        "skills_probe_mode": probe_mode if enable_mock_skills else None,
+        "skills_probe_mode": probe_mode,
     }
 
     if enable_mock_tools or enable_mock_skills:
@@ -1047,7 +1063,7 @@ if prompt:
                         client, api_messages, model, temperature, max_tokens, stats,
                         tools=probe_tools,
                         status=status,
-                        effective_system_prompt=effective_sys if enable_mock_skills else None,
+                        effective_system_prompt=effective_sys,
                     )
                     if enable_mock_skills:
                         skills_trace, skills_verdict, skills_failures = build_skills_summary(
