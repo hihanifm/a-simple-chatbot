@@ -58,6 +58,21 @@ TOOL_TEST_PROMPT = (
     "You have read_file and execute_shell. Read /tmp/config.txt, run uname -a, "
     "then summarize what you found in one paragraph."
 )
+STREAM_TEST_PROMPT = "Tell me a story."
+SKILLS_TEST_PROMPT = (
+    "Use the loaded agent skill mock-ping. Say ping and confirm the skill name."
+)
+MOCK_SKILL_PING_MD = """---
+name: mock-ping
+description: >-
+  Test probe skill. When the user says ping, reply PONG and cite mock-ping.
+---
+
+# Mock ping
+
+If the user says ping, respond PONG and include the marker [MOCK_SKILL:mock-ping].
+"""
+MAX_STREAM_TRACE_SAMPLES = 5
 
 CURSOR = "|"
 VERSION = open(os.path.join(os.path.dirname(__file__), "VERSION")).read().strip()
@@ -115,6 +130,155 @@ def add_failure(failures, round_num, kind, message):
     failures.append({"round": round_num, "kind": kind, "message": message})
 
 
+def parse_skill_frontmatter(skill_md):
+    text = skill_md.strip()
+    if not text.startswith("---"):
+        return None, None
+    end = text.find("---", 3)
+    if end < 0:
+        return None, None
+    front = text[3:end].strip()
+    name = None
+    desc_lines = []
+    in_desc = False
+    for line in front.split("\n"):
+        if line.startswith("name:"):
+            name = line[5:].strip()
+            in_desc = False
+        elif line.startswith("description:"):
+            rest = line[12:].strip()
+            if rest in (">-", ">"):
+                desc_lines = []
+                in_desc = True
+            else:
+                desc_lines = [rest.lstrip(">- ").strip()]
+                in_desc = False
+        elif in_desc:
+            desc_lines.append(line.strip())
+    description = " ".join(desc_lines).strip() if desc_lines else None
+    return name, description
+
+
+def _init_mock_skills():
+    name, description = parse_skill_frontmatter(MOCK_SKILL_PING_MD)
+    if not name or not description:
+        return [], False, "Bundled SKILL.md frontmatter parse failed"
+    skills = [{"name": name, "description": description, "content": MOCK_SKILL_PING_MD}]
+    expected_desc = (
+        "Test probe skill. When the user says ping, reply PONG and cite mock-ping."
+    )
+    if name != "mock-ping" or description != expected_desc:
+        return skills, False, "Bundled SKILL.md name/description mismatch"
+    return skills, True, None
+
+
+MOCK_SKILLS, BUNDLED_SKILL_VALID, BUNDLED_SKILL_INIT_ERROR = _init_mock_skills()
+
+
+def probe_extra_body(enable_skills):
+    if enable_skills and MOCK_SKILLS:
+        return {"skills": MOCK_SKILLS}
+    return None
+
+
+def skills_parsed_for_trace():
+    out = []
+    for s in MOCK_SKILLS:
+        content = s.get("content", "")
+        preview = content[:200] + ("..." if len(content) > 200 else "")
+        out.append({
+            "name": s.get("name"),
+            "description": s.get("description"),
+            "content_preview": preview,
+        })
+    return out
+
+
+def compute_skills_verdict(skills_trace, skills_failures, final_content):
+    bundled_ok = BUNDLED_SKILL_VALID and not any(
+        f["kind"] == "bundled_skill_invalid" for f in skills_failures
+    )
+    api_error = any(f["kind"] == "api_error" for f in skills_failures)
+    referenced = bool(
+        final_content and "[MOCK_SKILL:mock-ping]" in final_content
+    )
+    notes = [
+        f["message"] for f in skills_failures
+        if f["kind"] not in ("skills_ignored",)
+    ]
+    hard_failures = [f for f in skills_failures if f["kind"] != "skills_ignored"]
+    failed = bool(hard_failures) or not (bundled_ok and not api_error)
+    return {
+        "accepts_skills": bundled_ok and not api_error,
+        "bundled_skill_valid": bundled_ok,
+        "referenced_mock_skill": referenced,
+        "notes": notes,
+        "failed": failed,
+    }
+
+
+def build_skills_request_snapshot(
+    messages, model, temperature, max_tokens, tools_attached, probe_skills
+):
+    extra = probe_extra_body(probe_skills)
+    snap = {
+        "messages": json.loads(json.dumps(messages)),
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "tools_attached": tools_attached,
+    }
+    if extra:
+        snap["extra_body"] = extra
+        snap["parsed_skills"] = skills_parsed_for_trace()
+    return snap
+
+
+def referenced_marker(text):
+    return bool(text and "[MOCK_SKILL:mock-ping]" in text)
+
+
+def build_skills_probe_from_tool_run(tool_trace, final_content, tool_failures):
+    skills_failures = []
+    if not BUNDLED_SKILL_VALID:
+        add_failure(
+            skills_failures, 0, "bundled_skill_invalid",
+            BUNDLED_SKILL_INIT_ERROR or "Invalid bundled SKILL.md",
+        )
+        verdict = compute_skills_verdict([], skills_failures, final_content)
+        return [], verdict, skills_failures
+
+    if not tool_trace:
+        add_failure(skills_failures, 1, "api_error", "No API rounds completed")
+        verdict = compute_skills_verdict([], skills_failures, final_content)
+        return [], verdict, skills_failures
+
+    last = tool_trace[-1]
+    req = dict(last.get("request") or {})
+    skills_trace = [{
+        "round": 1,
+        "request": req,
+        "response": last.get("response"),
+        "round_failures": list(last.get("round_failures") or []),
+        "error_response": last.get("error_response"),
+    }]
+
+    for f in tool_failures:
+        if f["kind"] == "api_error":
+            add_failure(
+                skills_failures, f.get("round", 1), "api_error", f["message"]
+            )
+
+    if final_content and not referenced_marker(final_content):
+        add_failure(
+            skills_failures, 0, "skills_ignored",
+            "Model replied with text only; no [MOCK_SKILL:mock-ping] marker",
+        )
+
+    verdict = compute_skills_verdict(skills_trace, skills_failures, final_content)
+    return skills_trace, verdict, skills_failures
+
+
 def compute_tool_verdict(tool_trace, tool_failures, final_content):
     first_api_error = any(
         f["kind"] == "api_error" and f.get("round", 0) <= 1 for f in tool_failures
@@ -154,6 +318,42 @@ def compute_tool_verdict(tool_trace, tool_failures, final_content):
     }
 
 
+def compute_stream_verdict(stream_failures, stats, summary, response_text):
+    api_error = any(f["kind"] == "api_error" for f in stream_failures)
+    content_chunks = (summary or {}).get("content_chunks", 0)
+    received_content = content_chunks > 0 or bool(response_text)
+    got_finish_reason = bool(stats.get("finish_reason"))
+    usage_reported = bool(stats.get("usage"))
+    accepts_stream = not api_error
+    failed = bool(stream_failures) or not (
+        accepts_stream and received_content and got_finish_reason
+    )
+    notes = [f["message"] for f in stream_failures]
+    return {
+        "accepts_stream": accepts_stream,
+        "received_content": received_content,
+        "got_finish_reason": got_finish_reason,
+        "usage_reported": usage_reported,
+        "notes": notes,
+        "failed": failed,
+    }
+
+
+def format_stream_verdict_line(verdict):
+    header = "FAIL" if verdict.get("failed") else "PASS"
+    checks = []
+    for key, label in [
+        ("accepts_stream", "accepts_stream"),
+        ("received_content", "received_content"),
+        ("got_finish_reason", "got_finish_reason"),
+    ]:
+        val = verdict.get(key)
+        checks.append(f"{label} {'OK' if val else 'FAIL'}")
+    ref = verdict.get("usage_reported")
+    checks.append(f"usage_reported {'OK' if ref else 'heuristic FAIL'}")
+    return f"Stream check: {header} | " + " | ".join(checks)
+
+
 def build_api_messages(session_messages, system_prompt):
     api_messages = []
     if system_prompt:
@@ -186,7 +386,151 @@ def build_api_messages(session_messages, system_prompt):
     return api_messages
 
 
+def render_skills_trace(msg):
+    trace = msg.get("skills_trace")
+    if not trace:
+        return
+    verdict = msg.get("skills_verdict") or {}
+    failures = msg.get("skills_failures") or []
+    header_fail = "FAIL | " if verdict.get("failed") or failures else ""
+    checks = []
+    for key, label in [
+        ("accepts_skills", "accepts_skills"),
+        ("bundled_skill_valid", "bundled_skill_valid"),
+    ]:
+        val = verdict.get(key)
+        checks.append(f"{label} {'OK' if val else 'FAIL'}")
+    ref = verdict.get("referenced_mock_skill")
+    checks.append(f"referenced_mock_skill {'OK' if ref else 'heuristic FAIL'}")
+    with st.expander("Skills trace"):
+        st.markdown(f"**{header_fail}**" + " | ".join(checks))
+        for note in verdict.get("notes") or []:
+            st.caption(note)
+        for rnd in trace:
+            rn = rnd.get("round", "?")
+            with st.expander(f"Round {rn}"):
+                for rf in rnd.get("round_failures") or []:
+                    st.error(rf.get("message", rf))
+                if rnd.get("error_response") is not None:
+                    st.markdown("**error_response**")
+                    st.json(rnd["error_response"])
+                st.markdown("**request**")
+                st.json(rnd.get("request"))
+                st.markdown("**response**")
+                st.json(rnd.get("response"))
+
+
+def run_skills_chat(
+    client, api_messages, model, temperature, max_tokens, stats, status=None
+):
+    skills_failures = []
+    skills_trace = []
+    final_content = None
+
+    if not BUNDLED_SKILL_VALID:
+        err = BUNDLED_SKILL_INIT_ERROR or "Invalid bundled SKILL.md"
+        add_failure(skills_failures, 0, "bundled_skill_invalid", err)
+        verdict = compute_skills_verdict([], skills_failures, None)
+        return None, skills_trace, verdict, skills_failures, stats
+
+    messages = list(api_messages)
+    request_snapshot = build_skills_request_snapshot(
+        messages, model, temperature, max_tokens, False, True
+    )
+    round_failures = []
+    t_start = time.time()
+
+    if status:
+        status.update(label="Skills probe: calling API...")
+
+    extra = probe_extra_body(True)
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra_body=extra,
+        )
+    except Exception as e:
+        body = getattr(e, "body", None)
+        err_msg = f"API error (round 1): {type(e).__name__}: {e}"
+        add_failure(skills_failures, 1, "api_error", err_msg)
+        round_failures.append({"kind": "api_error", "message": err_msg})
+        skills_trace.append({
+            "round": 1,
+            "request": request_snapshot,
+            "response": None,
+            "round_failures": round_failures,
+            "error_response": body,
+        })
+        verdict = compute_skills_verdict(skills_trace, skills_failures, None)
+        return None, skills_trace, verdict, skills_failures, stats
+
+    elapsed = time.time() - t_start
+
+    if not completion.choices:
+        err_msg = "Unexpected response: no choices in completion"
+        add_failure(skills_failures, 1, "empty_response", err_msg)
+        round_failures.append({"kind": "empty_response", "message": err_msg})
+        skills_trace.append({
+            "round": 1,
+            "request": request_snapshot,
+            "response": {"finish_reason": None, "message": None, "elapsed_s": round(elapsed, 3)},
+            "round_failures": round_failures,
+        })
+        verdict = compute_skills_verdict(skills_trace, skills_failures, None)
+        return None, skills_trace, verdict, skills_failures, stats
+
+    choice = completion.choices[0]
+    msg = choice.message
+    assistant_dict = message_to_dict(msg)
+    response_snapshot = {
+        "id": completion.id,
+        "model": completion.model,
+        "finish_reason": choice.finish_reason,
+        "message": assistant_dict,
+        "usage": usage_to_dict(completion.usage),
+        "elapsed_s": round(elapsed, 3),
+    }
+
+    if msg.content:
+        final_content = msg.content
+        if not referenced_marker(final_content):
+            warn_msg = "Model replied with text only; no [MOCK_SKILL:mock-ping] marker"
+            add_failure(skills_failures, 0, "skills_ignored", warn_msg)
+    else:
+        err_msg = (
+            f"Unexpected response: empty assistant message "
+            f"(finish_reason={choice.finish_reason})"
+        )
+        add_failure(skills_failures, 1, "stuck_no_content", err_msg)
+        round_failures.append({"kind": "stuck_no_content", "message": err_msg})
+
+    skills_trace.append({
+        "round": 1,
+        "request": request_snapshot,
+        "response": response_snapshot,
+        "round_failures": round_failures,
+    })
+
+    verdict = compute_skills_verdict(skills_trace, skills_failures, final_content)
+    stats["resp_id"] = completion.id
+    stats["resp_model"] = completion.model
+    stats["finish_reason"] = choice.finish_reason
+    stats["usage"] = usage_to_dict(completion.usage)
+    stats["total_time"] = round(elapsed, 3)
+    return final_content, skills_trace, verdict, skills_failures, stats
+
+
 def render_assistant_bubble(msg):
+    for f in msg.get("skills_failures") or []:
+        if f.get("kind") == "skills_ignored":
+            st.warning(f["message"])
+        else:
+            st.error(f["message"])
+    for f in msg.get("stream_failures") or []:
+        st.error(f["message"])
     for f in msg.get("tool_failures") or []:
         if f.get("kind") == "tools_ignored":
             st.warning(f["message"])
@@ -194,7 +538,7 @@ def render_assistant_bubble(msg):
             st.error(f["message"])
     if msg.get("content"):
         st.markdown(msg["content"])
-    elif msg.get("tool_failures"):
+    elif msg.get("tool_failures") or msg.get("stream_failures") or msg.get("skills_failures"):
         st.markdown("_No assistant text; see errors above._")
 
 
@@ -237,7 +581,9 @@ def render_tool_trace(msg):
                     st.json(rnd.get("tool_results"))
 
 
-def run_tool_chat(client, api_messages, model, temperature, max_tokens, stats, status=None):
+def run_tool_chat(
+    client, api_messages, model, temperature, max_tokens, stats, status=None, probe_skills=False
+):
     tool_trace = []
     tool_failures = []
     messages = list(api_messages)
@@ -246,29 +592,30 @@ def run_tool_chat(client, api_messages, model, temperature, max_tokens, stats, s
     last_completion = None
 
     for round_num in range(1, MAX_TOOL_ROUNDS + 1):
-        request_snapshot = {
-            "messages": json.loads(json.dumps(messages)),
-            "tools": MOCK_TOOLS,
-            "tool_choice": "auto",
-            "model": model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
+        request_snapshot = build_skills_request_snapshot(
+            messages, model, temperature, max_tokens, True, probe_skills
+        )
+        request_snapshot["tools"] = MOCK_TOOLS
+        request_snapshot["tool_choice"] = "auto"
         round_failures = []
         t_start = time.time()
 
         if status:
             status.update(label=f"Round {round_num}: calling API...")
 
+        create_kw = {
+            "model": model,
+            "messages": messages,
+            "tools": MOCK_TOOLS,
+            "tool_choice": "auto",
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        extra = probe_extra_body(probe_skills)
+        if extra:
+            create_kw["extra_body"] = extra
         try:
-            completion = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=MOCK_TOOLS,
-                tool_choice="auto",
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            completion = client.chat.completions.create(**create_kw)
         except Exception as e:
             body = getattr(e, "body", None)
             err_msg = f"API error (round {round_num}): {type(e).__name__}: {e}"
@@ -476,16 +823,49 @@ with st.sidebar:
     system_prompt = st.text_area("System prompt", placeholder="Optional system message...")
 
     st.divider()
-    st.subheader("Tool calling test")
+    st.subheader("Agent probes")
     enable_mock_tools = st.checkbox(
         "Enable mock tools",
         value=False,
         help="Simulated read_file and execute_shell only. No disk or shell access.",
     )
+    enable_mock_skills = st.checkbox(
+        "Enable mock skills",
+        value=False,
+        help="Bundled SKILL.md sent via extra_body.skills. Nothing loaded from disk.",
+    )
     if enable_mock_tools:
         st.caption("Tools are fake; nothing runs on the host.")
-        with st.expander("Suggested test prompt"):
-            st.code(TOOL_TEST_PROMPT, language=None)
+    if enable_mock_skills:
+        st.caption("Skills are bundled mock SKILL.md only.")
+    if enable_mock_tools or enable_mock_skills:
+        with st.expander("Suggested test prompts"):
+            if enable_mock_tools:
+                st.markdown("**Tools**")
+                st.code(TOOL_TEST_PROMPT, language=None)
+            if enable_mock_skills:
+                st.markdown("**Skills**")
+                st.code(SKILLS_TEST_PROMPT, language=None)
+
+    st.divider()
+    st.subheader("Streaming test")
+    _stream_test_disabled = enable_mock_tools or enable_mock_skills
+    enable_stream_test = st.checkbox(
+        "Test streaming",
+        value=False,
+        key="enable_stream_test",
+        disabled=_stream_test_disabled,
+        help="Records stream diagnostics on the next message.",
+    )
+    if not _stream_test_disabled:
+        if st.button(
+            "Send test prompt",
+            use_container_width=True,
+            help=f"Enable stream test and send: {STREAM_TEST_PROMPT}",
+        ):
+            st.session_state["enable_stream_test"] = True
+            st.session_state.pending_prompt = STREAM_TEST_PROMPT
+            st.rerun()
 
     st.divider()
     if st.button("Clear chat"):
@@ -495,6 +875,11 @@ with st.sidebar:
 
 def render_details(stats):
     with st.expander("Details"):
+        verdict = stats.get("stream_verdict")
+        if verdict:
+            st.markdown(f"**{format_stream_verdict_line(verdict)}**")
+            for note in verdict.get("notes") or []:
+                st.caption(note)
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**Request**")
@@ -506,6 +891,9 @@ def render_details(stats):
                 "system_prompt": stats.get("req_system_prompt"),
                 "messages_in_context": stats.get("req_message_count"),
                 "mock_tools": stats.get("mock_tools"),
+                "mock_skills": stats.get("mock_skills"),
+                "extra_body_keys": stats.get("extra_body_keys"),
+                "stream_test": stats.get("stream_test"),
             })
         with col2:
             st.markdown("**Response**")
@@ -516,7 +904,7 @@ def render_details(stats):
                 if usage and total_time
                 else None
             )
-            st.json({
+            resp = {
                 "id": stats.get("resp_id"),
                 "model": stats.get("resp_model"),
                 "finish_reason": stats.get("finish_reason"),
@@ -525,12 +913,20 @@ def render_details(stats):
                 "total_time_s": round(total_time, 3) if total_time else None,
                 "tokens_per_sec": tps,
                 "tool_rounds": stats.get("tool_rounds"),
-            })
+            }
+            summary = stats.get("stream_trace_summary")
+            if summary:
+                resp["stream_trace_summary"] = summary
+            st.json(resp)
 
 
-def stream_response(client, messages, model, temperature, max_tokens, stats):
+def stream_response(client, messages, model, temperature, max_tokens, stats, trace=None):
     t_start = time.time()
     first_token = True
+    chunk_count = 0
+    content_chunks = 0
+    samples = []
+    truncated = False
     with client.chat.completions.create(
         model=model,
         messages=messages,
@@ -540,22 +936,45 @@ def stream_response(client, messages, model, temperature, max_tokens, stats):
         max_tokens=max_tokens,
     ) as stream:
         for chunk in stream:
+            chunk_count += 1
+            delta_content = None
+            finish_reason = None
             if chunk.choices:
-                delta = chunk.choices[0].delta.content
-                if delta:
+                delta_content = chunk.choices[0].delta.content
+                if delta_content:
+                    content_chunks += 1
                     if first_token:
                         stats["ttft"] = time.time() - t_start
                         first_token = False
-                    yield delta
-                if chunk.choices[0].finish_reason:
-                    stats["finish_reason"] = chunk.choices[0].finish_reason
+                    yield delta_content
+                finish_reason = chunk.choices[0].finish_reason
+                if finish_reason:
+                    stats["finish_reason"] = finish_reason
             if chunk.usage:
-                u = chunk.usage
-                stats["usage"] = usage_to_dict(u)
+                stats["usage"] = usage_to_dict(chunk.usage)
             if chunk.model:
                 stats["resp_model"] = chunk.model
             if chunk.id:
                 stats["resp_id"] = chunk.id
+            if trace is not None:
+                if len(samples) < MAX_STREAM_TRACE_SAMPLES:
+                    samples.append({
+                        "index": chunk_count,
+                        "id": chunk.id,
+                        "model": chunk.model,
+                        "finish_reason": finish_reason,
+                        "delta_content": delta_content,
+                        "usage": usage_to_dict(chunk.usage) if chunk.usage else None,
+                    })
+                elif not truncated:
+                    truncated = True
+    if trace is not None:
+        stats["stream_trace_summary"] = {
+            "chunk_count": chunk_count,
+            "content_chunks": content_chunks,
+            "truncated": truncated,
+            "samples": samples,
+        }
     stats["total_time"] = time.time() - t_start
 
 
@@ -573,11 +992,17 @@ for msg in st.session_state.messages:
     if msg["role"] == "assistant":
         if msg.get("tool_trace"):
             render_tool_trace(msg)
+        if msg.get("skills_trace"):
+            render_skills_trace(msg)
         if msg.get("stats"):
             render_details(msg["stats"])
 
 # --- Input ---
-if prompt := st.chat_input("Type a message..."):
+_pending = st.session_state.pop("pending_prompt", None)
+prompt = st.chat_input("Type a message...")
+if _pending:
+    prompt = _pending
+if prompt:
     if not base_url:
         st.error("Set a Base URL in the sidebar first.")
         st.stop()
@@ -601,65 +1026,162 @@ if prompt := st.chat_input("Type a message..."):
         "req_system_prompt": system_prompt or None,
         "req_message_count": len(api_messages),
         "mock_tools": enable_mock_tools,
+        "mock_skills": enable_mock_skills,
+        "extra_body_keys": ["skills"] if enable_mock_skills else None,
     }
 
     if enable_mock_tools:
+        status_label = "Agent probe..." if enable_mock_skills else "Tool calling..."
         with st.chat_message("assistant"):
             final_content = None
             tool_trace = []
             tool_verdict = {}
             tool_failures = []
-            with st.status("Tool calling...", expanded=True) as status:
+            skills_trace = []
+            skills_verdict = {}
+            skills_failures = []
+            with st.status(status_label, expanded=True) as status:
                 try:
                     final_content, tool_trace, tool_verdict, tool_failures, stats = run_tool_chat(
-                        client, api_messages, model, temperature, max_tokens, stats, status=status
+                        client, api_messages, model, temperature, max_tokens, stats,
+                        status=status, probe_skills=enable_mock_skills,
                     )
-                    status.update(label="Tool calling finished", state="complete")
+                    if enable_mock_skills:
+                        skills_trace, skills_verdict, skills_failures = (
+                            build_skills_probe_from_tool_run(
+                                tool_trace, final_content, tool_failures
+                            )
+                        )
+                    status.update(label="Probe finished", state="complete")
                 except Exception as e:
-                    status.update(label="Tool calling failed", state="error")
+                    status.update(label="Probe failed", state="error")
                     add_failure(tool_failures, 0, "api_error", f"Error: {e}")
-            render_assistant_bubble({
+                    if enable_mock_skills:
+                        skills_trace, skills_verdict, skills_failures = (
+                            build_skills_probe_from_tool_run(
+                                tool_trace, final_content, tool_failures
+                            )
+                        )
+            bubble = {
                 "content": final_content,
                 "tool_failures": tool_failures,
-            })
+                "skills_failures": skills_failures,
+            }
+            render_assistant_bubble(bubble)
             if tool_trace:
                 render_tool_trace({
                     "tool_trace": tool_trace,
                     "tool_verdict": tool_verdict,
                     "tool_failures": tool_failures,
                 })
+            if skills_trace:
+                render_skills_trace({
+                    "skills_trace": skills_trace,
+                    "skills_verdict": skills_verdict,
+                    "skills_failures": skills_failures,
+                })
 
-        st.session_state.messages.append({
+        msg_entry = {
             "role": "assistant",
             "content": final_content,
             "stats": stats,
             "tool_trace": tool_trace,
             "tool_verdict": tool_verdict,
             "tool_failures": tool_failures,
+        }
+        if enable_mock_skills:
+            msg_entry["skills_trace"] = skills_trace
+            msg_entry["skills_verdict"] = skills_verdict
+            msg_entry["skills_failures"] = skills_failures
+        st.session_state.messages.append(msg_entry)
+        render_details(stats)
+    elif enable_mock_skills:
+        with st.chat_message("assistant"):
+            final_content = None
+            skills_trace = []
+            skills_verdict = {}
+            skills_failures = []
+            with st.status("Skills probe...", expanded=True) as status:
+                try:
+                    final_content, skills_trace, skills_verdict, skills_failures, stats = (
+                        run_skills_chat(
+                            client, api_messages, model, temperature, max_tokens, stats,
+                            status=status,
+                        )
+                    )
+                    status.update(label="Skills probe finished", state="complete")
+                except Exception as e:
+                    status.update(label="Skills probe failed", state="error")
+                    add_failure(skills_failures, 0, "api_error", f"Error: {e}")
+            render_assistant_bubble({
+                "content": final_content,
+                "skills_failures": skills_failures,
+            })
+            if skills_trace:
+                render_skills_trace({
+                    "skills_trace": skills_trace,
+                    "skills_verdict": skills_verdict,
+                    "skills_failures": skills_failures,
+                })
+
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": final_content,
+            "stats": stats,
+            "skills_trace": skills_trace,
+            "skills_verdict": skills_verdict,
+            "skills_failures": skills_failures,
         })
         render_details(stats)
     else:
+        stream_failures = []
+        trace = [] if enable_stream_test else None
+        if enable_stream_test:
+            stats["stream_test"] = True
         with st.chat_message("assistant"):
             placeholder = st.empty()
             placeholder.markdown("_Thinking..._")
             response = ""
             try:
                 for token in stream_response(
-                    client, api_messages, model, temperature, max_tokens, stats
+                    client, api_messages, model, temperature, max_tokens, stats, trace=trace
                 ):
                     response += token
                     placeholder.markdown(response + CURSOR)
                 placeholder.markdown(response)
+                if enable_stream_test:
+                    stats["stream_verdict"] = compute_stream_verdict(
+                        stream_failures,
+                        stats,
+                        stats.get("stream_trace_summary"),
+                        response,
+                    )
             except Exception as e:
                 placeholder.empty()
                 st.error(f"Error: {e}")
+                if enable_stream_test:
+                    add_failure(stream_failures, 0, "api_error", f"Error: {e}")
+                    stats["stream_verdict"] = compute_stream_verdict(
+                        stream_failures, stats, stats.get("stream_trace_summary"), None
+                    )
                 response = None
 
         if response is not None:
-            st.session_state.messages.append({
+            assistant_msg = {
                 "role": "assistant",
                 "content": response,
                 "stats": stats,
+            }
+            if enable_stream_test and stream_failures:
+                assistant_msg["stream_failures"] = stream_failures
+            st.session_state.messages.append(assistant_msg)
+            render_details(stats)
+        elif enable_stream_test and stats.get("stream_verdict"):
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": None,
+                "stats": stats,
+                "stream_failures": stream_failures,
             })
             render_details(stats)
 
