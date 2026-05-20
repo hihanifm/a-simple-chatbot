@@ -850,6 +850,8 @@ with st.sidebar:
     st.divider()
     st.subheader("Streaming test")
     _stream_test_disabled = enable_mock_tools or enable_mock_skills
+    if st.session_state.pop("_enable_stream_test_for_send", False):
+        st.session_state["enable_stream_test"] = True
     enable_stream_test = st.checkbox(
         "Test streaming",
         value=False,
@@ -863,7 +865,7 @@ with st.sidebar:
             use_container_width=True,
             help=f"Enable stream test and send: {STREAM_TEST_PROMPT}",
         ):
-            st.session_state["enable_stream_test"] = True
+            st.session_state["_enable_stream_test_for_send"] = True
             st.session_state.pending_prompt = STREAM_TEST_PROMPT
             st.rerun()
 
