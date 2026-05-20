@@ -14,12 +14,10 @@ services:
     volumes:
       - ./app.py:/app/app.py:ro
       - ./llm_client.py:/app/llm_client.py:ro
-      - ./lab_stub.py:/app/lab_stub.py:ro
       - ./lab_adapter_openai_reference.py:/app/lab_adapter_openai_reference.py:ro
     environment:
       INTERNAL_LLM_URL: ${INTERNAL_LLM_URL:-http://host.docker.internal:35700/v1}
-      LAB_LLM_URL: ${LAB_LLM_URL:-http://host.docker.internal:8080}
-      LAB_ADAPTER_FLAVOR: ${LAB_ADAPTER_FLAVOR:-}
+      LAB_LLM_URL: ${LAB_LLM_URL:-http://host.docker.internal:11434/v1}
       LAB_OPENAI_API_KEY: ${LAB_OPENAI_API_KEY:-ollama}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -38,8 +36,7 @@ services:
       - "8600:8501"
     environment:
       INTERNAL_LLM_URL: ${INTERNAL_LLM_URL:-http://host.docker.internal:35700/v1}
-      LAB_LLM_URL: ${LAB_LLM_URL:-http://host.docker.internal:8080}
-      LAB_ADAPTER_FLAVOR: ${LAB_ADAPTER_FLAVOR:-}
+      LAB_LLM_URL: ${LAB_LLM_URL:-http://host.docker.internal:11434/v1}
       LAB_OPENAI_API_KEY: ${LAB_OPENAI_API_KEY:-ollama}
     extra_hosts:
       - "host.docker.internal:host-gateway"

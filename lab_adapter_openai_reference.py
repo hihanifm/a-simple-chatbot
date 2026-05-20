@@ -1,15 +1,11 @@
 """
-Reference lab adapter: native OpenAI-compatible HTTP via httpx (not the OpenAI SDK).
+Default lab adapter: OpenAI-compatible HTTP via httpx (not the OpenAI SDK).
 
-Use to learn the lab adapter contract or to test the Lab provider against Ollama/Internal.
+Used automatically when lab_adapter.py is missing. Provides raw_request/raw_response
+in API trace. Copy to lab_adapter.py at the office and replace endpoints/headers/body
+mapping for your native API.
 
-Enable without copying files:
-  LAB_ADAPTER_FLAVOR=openai_compat
-
-Or copy this file to lab_adapter.py and adjust build_headers() for your real API.
-
-Env (openai_compat flavor):
-  LAB_OPENAI_API_KEY  - Bearer token (default "ollama" for Ollama)
+Env: LAB_OPENAI_API_KEY (Bearer; default "ollama" for Ollama)
 """
 
 from __future__ import annotations

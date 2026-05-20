@@ -4,9 +4,8 @@ Office implementation template for the internal lab LLM (non-OpenAI API).
 Copy this file to lab_adapter.py at the office and implement with your internal
 coding agent. Do not commit lab_adapter.py if it must not leave the lab.
 
-Reference (OpenAI-compatible over httpx, for learning / local test):
-  See lab_adapter_openai_reference.py
-  Enable: LAB_ADAPTER_FLAVOR=openai_compat  (uses sidebar Base URL + LAB_OPENAI_API_KEY)
+Until lab_adapter.py exists, Lab provider uses lab_adapter_openai_reference.py
+(OpenAI-compatible httpx + raw API trace). Copy patterns from that file.
 
 Checklist (give your agent this file + internal API docs):
   - Base URL from sidebar / LAB_LLM_URL env

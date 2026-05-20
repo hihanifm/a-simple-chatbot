@@ -15,12 +15,6 @@ DEFAULT_OPENAI_CAPABILITIES = {
     "tools": True,
 }
 
-DEFAULT_LAB_STUB_CAPABILITIES = {
-    "list_models": False,
-    "stream": False,
-    "tools": False,
-}
-
 OPENAI_REDACT_HEADERS = frozenset({
     "authorization",
     "api-key",
@@ -202,18 +196,12 @@ class OpenAIAdapter(LLMClient):
 def make_llm_client(backend_cfg: dict, base_url: str, api_key: str) -> LLMClient:
     adapter = backend_cfg.get("adapter", "openai")
     if adapter == "lab":
-        flavor = os.environ.get("LAB_ADAPTER_FLAVOR", "").strip()
-        if flavor == "openai_compat":
+        try:
+            from lab_adapter import LabAdapter
+
+            return LabAdapter(base_url)
+        except ImportError:
             from lab_adapter_openai_reference import LabOpenAIReferenceAdapter
 
             return LabOpenAIReferenceAdapter(base_url, api_key)
-        try:
-            from lab_adapter import LabAdapter  # noqa: F401
-        except ImportError:
-            from lab_stub import LabAdapterStub
-
-            return LabAdapterStub(base_url)
-        from lab_adapter import LabAdapter
-
-        return LabAdapter(base_url)
     return OpenAIAdapter(base_url, api_key)

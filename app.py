@@ -885,21 +885,17 @@ with st.sidebar:
 
     base_url = st.text_input("Base URL", value=cfg["default_url"], key=f"base_url_{backend}")
     if _is_lab:
-        _lab_flavor = os.environ.get("LAB_ADAPTER_FLAVOR", "").strip()
-        if _lab_flavor == "openai_compat":
-            st.caption(
-                "Reference flavor: OpenAI-compatible HTTP via lab adapter "
-                "(raw API trace). Key from env LAB_OPENAI_API_KEY or below."
-            )
-            api_key = st.text_input(
-                "API Key (openai_compat)",
-                value=os.environ.get("LAB_OPENAI_API_KEY") or "ollama",
-                type="password",
-                key="lab_openai_compat_key",
-            )
-        else:
-            st.caption("Auth is configured in lab_adapter.py (custom headers, not API Key).")
-            api_key = ""
+        st.caption(
+            "Default: OpenAI-compatible lab adapter (httpx + raw API trace). "
+            "Add lab_adapter.py at the office for your native API."
+        )
+        api_key = st.text_input(
+            "API Key",
+            value=os.environ.get("LAB_OPENAI_API_KEY") or cfg["default_key"] or "ollama",
+            type="password",
+            key="lab_api_key",
+            help="Used by default lab adapter. Custom lab_adapter.py may use build_headers() instead.",
+        )
     else:
         api_key = st.text_input(
             "API Key", value=cfg["default_key"], type="password",

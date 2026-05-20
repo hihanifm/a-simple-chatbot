@@ -28,15 +28,14 @@ make logs                # tail logs (prints the URL as a reminder)
 
 - **`app.py`** — Streamlit UI, probes, API trace, message history.
 - **`llm_client.py`** — `make_llm_client()`, `OpenAIAdapter`, `redact_headers()`, `ChatCompleteResult`.
-- **`lab_stub.py`** — used when `lab_adapter.py` is missing (NotImplementedError with setup instructions).
 - **`lab_adapter.py.example`** — office template; copy to `lab_adapter.py` at the lab (not committed here if sensitive).
-- **`lab_adapter_openai_reference.py`** — working reference flavor: same OpenAI `/v1` API over httpx with **raw_request** / **raw_response** in trace. Set `LAB_ADAPTER_FLAVOR=openai_compat`, point Lab Base URL at Ollama/Internal (e.g. `http://host.docker.internal:11434/v1`), optional `LAB_OPENAI_API_KEY=ollama`.
+- **`lab_adapter_openai_reference.py`** — default when `lab_adapter.py` is missing: OpenAI `/v1` over httpx with **raw_request** / **raw_response** in trace. Lab Base URL defaults to Ollama (`LAB_LLM_URL`).
 
 Key sections in `app.py`:
 
 - **`BACKENDS` dict** — `adapter`: `openai` or `lab`, default URL/model/key. Internal URL falls back to `http://host.docker.internal:35700/v1` if `INTERNAL_LLM_URL` is unset or empty (use `or`, not `get()`). Lab URL uses `LAB_LLM_URL` or `http://host.docker.internal:8080`.
 - **Sidebar** — provider selectbox, base URL, API key (hidden for Lab; auth in `lab_adapter.build_headers()`). Capabilities from the client gate model fetch, streaming, and mock probes. Switching provider auto-fetches models when `list_models` is supported.
-- **`make_llm_client()`** — returns `OpenAIAdapter` or `LabAdapter` / `LabAdapterStub`.
+- **`make_llm_client()`** — returns `OpenAIAdapter`, office `LabAdapter`, or default `LabOpenAIReferenceAdapter`.
 - **`stream_response()`** — delegates to `client.iter_chat_stream()`. Captures TTFT, finish_reason, usage into `stats`.
 - **Streaming display** — uses `st.empty()` placeholder showing `_Thinking..._` until first token arrives, then appends tokens with `|` cursor manually. Do NOT use `st.write_stream()` (no pre-stream placeholder) or `st.spinner()` inside `st.chat_message` — spinner disrupts the bubble context and causes assistant messages to disappear from history replay.
 - **Streaming** — sidebar `Stream responses` checkbox under Request params (default on; disabled when mock probes are on). On: token-by-token via `stream_response()`. Off: single blocking completion via `blocking_chat_response()`.
@@ -58,7 +57,7 @@ Key sections in `app.py`:
 | dev     | 8601      |
 | prod    | 8600      |
 
-Both map to container port `8501`. `extra_hosts: host-gateway` lets containers reach host services via `host.docker.internal` on both Mac and Linux. `INTERNAL_LLM_URL` and `LAB_LLM_URL` are set in docker-compose when not in the environment. Dev compose mounts `app.py`, `llm_client.py`, and `lab_stub.py`.
+Both map to container port `8501`. `extra_hosts: host-gateway` lets containers reach host services via `host.docker.internal` on both Mac and Linux. `INTERNAL_LLM_URL` and `LAB_LLM_URL` are set in docker-compose when not in the environment. Dev compose mounts `app.py`, `llm_client.py`, and `lab_adapter_openai_reference.py`.
 
 ## pip-cache
 
