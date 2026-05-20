@@ -5,6 +5,6 @@ __pycache__/
 .env
 .env.*
 !.env.example
-pip-cache/*.whl
-pip-cache/*.tar.gz
+pip-cache/**/*.whl
+pip-cache/**/*.tar.gz
 .DS_Store

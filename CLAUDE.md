@@ -55,16 +55,14 @@ Host and container both use port `8501`. `extra_hosts: host-gateway` lets the co
 
 ## pip-cache
 
-`pip-cache/` holds pre-downloaded wheels for offline Docker builds. The directory is tracked (`.gitkeep`); wheels are gitignored.
+`pip-cache/` holds pre-downloaded wheels for offline Docker builds. Wheels go under **`pip-cache/<arch>/`** where `<arch>` is `uname -m` (`x86_64`, `aarch64`, etc.). `make build` passes `BUILD_ARCH` into the image and uses that subfolder when present (falls back to a flat `pip-cache/` layout).
 
-On each machine **and arch** where you build the image (e.g. office Linux x86_64), run once while online:
+On each machine where you build, run once while online:
 
 ```bash
-cp .env.example .env   # set HTTP_PROXY, HTTPS_PROXY, NO_PROXY, PIP_INDEX_URL if needed
-make pip-cache
+cp .env.example .env   # HTTP_PROXY, HTTPS_PROXY, NO_PROXY, PIP_INDEX_URL if needed
+make pip-cache         # detects arch, writes pip-cache/x86_64 or pip-cache/aarch64
 make build
 ```
 
-`make` loads `.env` and exports proxy vars for `pip-cache` and `docker compose build`. Use `PIP_INDEX_URL` if your lab uses an internal PyPI mirror instead of pypi.org. After `pip-cache` succeeds, `make build` can run offline (no PyPI in Docker).
-
-Wheels from a Mac (arm64) do not work on Linux (x86_64) — re-run `make pip-cache` on the office PC. If pip still fails behind SSL-inspecting proxies, ask IT for the corporate index URL and set `PIP_INDEX_URL` in `.env`.
+`scripts/pip-cache-download.sh` picks pip `--platform` tags from the host arch and retries without `--only-binary` if wheels are missing. Mac and office Linux can each keep their own subfolder; you can copy only `pip-cache/x86_64/` to the office PC if needed.

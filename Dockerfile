@@ -5,6 +5,7 @@ ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
 ARG PIP_INDEX_URL
+ARG HOST_ARCH
 ENV HTTP_PROXY=${HTTP_PROXY} \
     HTTPS_PROXY=${HTTPS_PROXY} \
     NO_PROXY=${NO_PROXY} \
@@ -15,8 +16,15 @@ COPY requirements.txt .
 COPY pip-cache/ /tmp/pip-cache/
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    if ls /tmp/pip-cache/*.whl /tmp/pip-cache/*.tar.gz 2>/dev/null | grep -q .; then \
-      pip install --no-index --find-links /tmp/pip-cache/ -r requirements.txt; \
+    CACHE_DIR="/tmp/pip-cache"; \
+    if [ -n "$${HOST_ARCH:-}" ] && ls "/tmp/pip-cache/$${HOST_ARCH}"/*.whl \
+        "/tmp/pip-cache/$${HOST_ARCH}"/*.tar.gz 2>/dev/null | grep -q .; then \
+      CACHE_DIR="/tmp/pip-cache/$${HOST_ARCH}"; \
+    elif ls /tmp/pip-cache/*.whl /tmp/pip-cache/*.tar.gz 2>/dev/null | grep -q .; then \
+      CACHE_DIR="/tmp/pip-cache"; \
+    fi; \
+    if ls "$$CACHE_DIR"/*.whl "$$CACHE_DIR"/*.tar.gz 2>/dev/null | grep -q .; then \
+      pip install --no-index --find-links "$$CACHE_DIR" -r requirements.txt; \
     else \
       INDEX_OPT=""; \
       if [ -n "$${PIP_INDEX_URL:-}" ]; then INDEX_OPT="-i $${PIP_INDEX_URL}"; fi; \

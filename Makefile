@@ -4,10 +4,8 @@ include .env
 export
 endif
 
-PIP_TRUSTED := \
-	--trusted-host pypi.org \
-	--trusted-host pypi.python.org \
-	--trusted-host files.pythonhosted.org
+BUILD_ARCH := $(shell uname -m)
+export BUILD_ARCH
 
 .PHONY: help up down build rebuild logs restart ps pip-cache clean
 
@@ -17,7 +15,7 @@ help:
 	@echo "  make restart            down + up without rebuild"
 	@echo "  make logs               Tail logs"
 	@echo "  make ps                 Container status"
-	@echo "  make pip-cache          Download wheels (uses HTTP_PROXY / PIP_INDEX_URL from .env)"
+	@echo "  make pip-cache          Download wheels to pip-cache/<arch> (proxy via .env)"
 	@echo "  make clean              Remove containers/volumes; prune images"
 	@echo ""
 	@echo "Inside Docker, reach host Ollama at: http://host.docker.internal:11434/v1"
@@ -47,20 +45,8 @@ ps:
 	docker compose ps
 
 pip-cache:
-	@ARCH=$$(uname -m); \
-	if [ "$$ARCH" = "arm64" ] || [ "$$ARCH" = "aarch64" ]; then \
-	  PLAT="--platform manylinux_2_17_aarch64 --platform linux_aarch64"; \
-	else \
-	  PLAT="--platform manylinux_2_17_x86_64 --platform manylinux2014_x86_64 --platform linux_x86_64"; \
-	fi; \
-	INDEX_ARG=""; \
-	if [ -n "$${PIP_INDEX_URL:-}" ]; then INDEX_ARG="-i $$PIP_INDEX_URL"; fi; \
-	pip download $$PLAT $$INDEX_ARG \
-	  $(PIP_TRUSTED) \
-	  --python-version 3.11 --implementation cp --abi cp311 \
-	  --only-binary=:all: \
-	  -r requirements.txt \
-	  -d pip-cache/
+	@chmod +x scripts/pip-cache-download.sh
+	@./scripts/pip-cache-download.sh
 
 clean:
 	docker compose down --remove-orphans -v
