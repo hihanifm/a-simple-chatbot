@@ -59,9 +59,27 @@ TOOL_TEST_PROMPT = (
     "then summarize what you found in one paragraph."
 )
 STREAM_TEST_PROMPT = "Tell me a story."
-SKILLS_TEST_PROMPT = (
-    "Use the loaded agent skill mock-ping. Say ping and confirm the skill name."
-)
+SKILLS_TEST_PROMPT = "Say ping."
+LOAD_SKILL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "load_skill",
+        "description": (
+            "Load full instructions for an agent skill by name when the user task matches."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "skill_name": {
+                    "type": "string",
+                    "description": "Skill name from the catalog, e.g. mock-ping",
+                },
+            },
+            "required": ["skill_name"],
+        },
+    },
+}
+SKILL_PROBE_MODES = ("catalog_tool", "full_system")
 MOCK_SKILL_PING_MD = """---
 name: mock-ping
 description: >-
@@ -94,6 +112,11 @@ def mock_tool_handler(name, arguments_str):
         return (
             f"[MOCK_SHELL] command={cmd}\nexit_code: 0\nstdout:\nmock output for: {cmd}"
         )
+    if name == "load_skill":
+        skill_name = args.get("skill_name", "")
+        if skill_name == "mock-ping":
+            return MOCK_SKILL_PING_MD
+        return f"[MOCK_ERROR] unknown skill: {skill_name}"
     return f"[MOCK_ERROR] unknown handler for {name}"
 
 
@@ -175,111 +198,154 @@ def _init_mock_skills():
 MOCK_SKILLS, BUNDLED_SKILL_VALID, BUNDLED_SKILL_INIT_ERROR = _init_mock_skills()
 
 
-def probe_extra_body(enable_skills):
-    if enable_skills and MOCK_SKILLS:
-        return {"skills": MOCK_SKILLS}
-    return None
+def referenced_marker(text):
+    return bool(text and "[MOCK_SKILL:mock-ping]" in text)
 
 
-def skills_parsed_for_trace():
-    out = []
-    for s in MOCK_SKILLS:
-        content = s.get("content", "")
-        preview = content[:200] + ("..." if len(content) > 200 else "")
-        out.append({
-            "name": s.get("name"),
-            "description": s.get("description"),
-            "content_preview": preview,
-        })
-    return out
+def build_effective_system_prompt(user_system, mode):
+    if mode == "catalog_tool":
+        skill = MOCK_SKILLS[0] if MOCK_SKILLS else {"name": "mock-ping", "description": ""}
+        appendix = (
+            "Available agent skills (call load_skill with skill_name to load full instructions):\n"
+            f"- {skill['name']}: {skill['description']}"
+        )
+    else:
+        appendix = f"Loaded agent skill (mock-ping):\n{MOCK_SKILL_PING_MD}"
+    if user_system:
+        return user_system + "\n\n" + appendix
+    return appendix
 
 
-def compute_skills_verdict(skills_trace, skills_failures, final_content):
+def get_probe_tools(enable_tools, enable_skills, skills_mode):
+    tools = []
+    if enable_tools:
+        tools.extend(MOCK_TOOLS)
+    if enable_skills and skills_mode == "catalog_tool":
+        tools.append(LOAD_SKILL_TOOL)
+    return tools
+
+
+def tool_names_from_tools(tools):
+    return frozenset(t["function"]["name"] for t in tools)
+
+
+def extract_load_skill_calls(tool_trace):
+    calls = []
+    for rnd in tool_trace:
+        msg = (rnd.get("response") or {}).get("message") or {}
+        for tc in msg.get("tool_calls") or []:
+            fn = (tc.get("function") or {}).get("name")
+            if fn != "load_skill":
+                continue
+            args_raw = (tc.get("function") or {}).get("arguments") or "{}"
+            try:
+                args = json.loads(args_raw)
+            except json.JSONDecodeError:
+                args = {"_raw": args_raw}
+            content = None
+            for tr in rnd.get("tool_results") or []:
+                if tr.get("name") == "load_skill":
+                    content = tr.get("content")
+                    break
+            preview = (content or "")[:200]
+            if content and len(content) > 200:
+                preview += "..."
+            calls.append({
+                "round": rnd.get("round"),
+                "skill_name": args.get("skill_name"),
+                "arguments": args,
+                "content_preview": preview,
+            })
+    return calls
+
+
+def compute_skills_verdict_from_trace(
+    tool_trace, skills_failures, final_content, mode
+):
     bundled_ok = BUNDLED_SKILL_VALID and not any(
         f["kind"] == "bundled_skill_invalid" for f in skills_failures
     )
     api_error = any(f["kind"] == "api_error" for f in skills_failures)
-    referenced = bool(
-        final_content and "[MOCK_SKILL:mock-ping]" in final_content
-    )
+    load_calls = extract_load_skill_calls(tool_trace)
+    called_load = bool(load_calls)
+    load_ok = False
+    valid_names = True
+    for c in load_calls:
+        if c.get("skill_name") and c["skill_name"] != "mock-ping":
+            valid_names = False
+    for rnd in tool_trace:
+        for tr in rnd.get("tool_results") or []:
+            if tr.get("name") == "load_skill" and referenced_marker(tr.get("content")):
+                load_ok = True
+                break
+        if load_ok:
+            break
+
+    referenced = referenced_marker(final_content)
     notes = [
         f["message"] for f in skills_failures
-        if f["kind"] not in ("skills_ignored",)
+        if f["kind"] not in ("skill_not_applied",)
     ]
-    hard_failures = [f for f in skills_failures if f["kind"] != "skills_ignored"]
-    failed = bool(hard_failures) or not (bundled_ok and not api_error)
+    hard_failures = [f for f in skills_failures if f["kind"] != "skill_not_applied"]
+
+    if mode == "catalog_tool":
+        failed = bool(hard_failures) or not (
+            bundled_ok and not api_error and called_load and load_ok and valid_names
+        )
+    else:
+        failed = bool(hard_failures) or not (bundled_ok and not api_error and referenced)
+
     return {
-        "accepts_skills": bundled_ok and not api_error,
+        "skills_probe_mode": mode,
         "bundled_skill_valid": bundled_ok,
+        "called_load_skill": called_load if mode == "catalog_tool" else None,
+        "load_skill_result_ok": load_ok if mode == "catalog_tool" else None,
         "referenced_mock_skill": referenced,
         "notes": notes,
         "failed": failed,
     }
 
 
-def build_skills_request_snapshot(
-    messages, model, temperature, max_tokens, tools_attached, probe_skills
+def build_skills_summary(
+    tool_trace, effective_system_prompt, mode, skills_failures, final_content, tools
 ):
-    extra = probe_extra_body(probe_skills)
-    snap = {
-        "messages": json.loads(json.dumps(messages)),
-        "model": model,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "tools_attached": tools_attached,
-    }
-    if extra:
-        snap["extra_body"] = extra
-        snap["parsed_skills"] = skills_parsed_for_trace()
-    return snap
-
-
-def referenced_marker(text):
-    return bool(text and "[MOCK_SKILL:mock-ping]" in text)
-
-
-def build_skills_probe_from_tool_run(tool_trace, final_content, tool_failures):
-    skills_failures = []
+    failures = list(skills_failures)
     if not BUNDLED_SKILL_VALID:
         add_failure(
-            skills_failures, 0, "bundled_skill_invalid",
+            failures, 0, "bundled_skill_invalid",
             BUNDLED_SKILL_INIT_ERROR or "Invalid bundled SKILL.md",
         )
-        verdict = compute_skills_verdict([], skills_failures, final_content)
-        return [], verdict, skills_failures
+        verdict = compute_skills_verdict_from_trace([], failures, final_content, mode)
+        return {"skills_probe_mode": mode}, verdict, failures
 
-    if not tool_trace:
-        add_failure(skills_failures, 1, "api_error", "No API rounds completed")
-        verdict = compute_skills_verdict([], skills_failures, final_content)
-        return [], verdict, skills_failures
+    excerpt = effective_system_prompt or ""
+    if len(excerpt) > 500:
+        excerpt = excerpt[:500] + "..."
 
-    last = tool_trace[-1]
-    req = dict(last.get("request") or {})
-    skills_trace = [{
-        "round": 1,
-        "request": req,
-        "response": last.get("response"),
-        "round_failures": list(last.get("round_failures") or []),
-        "error_response": last.get("error_response"),
-    }]
-
-    for f in tool_failures:
-        if f["kind"] == "api_error":
+    if final_content:
+        if mode == "catalog_tool" and tools and not extract_load_skill_calls(tool_trace):
             add_failure(
-                skills_failures, f.get("round", 1), "api_error", f["message"]
+                failures, 0, "skill_not_applied",
+                "Model replied with text only; never called load_skill",
+            )
+        elif mode == "full_system" and not referenced_marker(final_content):
+            add_failure(
+                failures, 0, "skill_not_applied",
+                "Model replied without [MOCK_SKILL:mock-ping] marker",
             )
 
-    if final_content and not referenced_marker(final_content):
-        add_failure(
-            skills_failures, 0, "skills_ignored",
-            "Model replied with text only; no [MOCK_SKILL:mock-ping] marker",
-        )
+    summary = {
+        "skills_probe_mode": mode,
+        "system_skill_excerpt": excerpt,
+        "load_skill_calls": extract_load_skill_calls(tool_trace),
+    }
+    verdict = compute_skills_verdict_from_trace(
+        tool_trace, failures, final_content, mode
+    )
+    return summary, verdict, failures
 
-    verdict = compute_skills_verdict(skills_trace, skills_failures, final_content)
-    return skills_trace, verdict, skills_failures
 
-
-def compute_tool_verdict(tool_trace, tool_failures, final_content):
+def compute_tool_verdict(tool_trace, tool_failures, final_content, allowed_tool_names):
     first_api_error = any(
         f["kind"] == "api_error" and f.get("round", 0) <= 1 for f in tool_failures
     )
@@ -293,7 +359,7 @@ def compute_tool_verdict(tool_trace, tool_failures, final_content):
             emitted = True
             for tc in tcs:
                 fn = (tc.get("function") or {}).get("name")
-                if fn and fn not in MOCK_TOOL_NAMES:
+                if fn and fn not in allowed_tool_names:
                     valid_names = False
         if rnd.get("tool_results"):
             tool_results_sent = True
@@ -387,145 +453,33 @@ def build_api_messages(session_messages, system_prompt):
 
 
 def render_skills_trace(msg):
-    trace = msg.get("skills_trace")
-    if not trace:
+    summary = msg.get("skills_trace")
+    if not summary:
         return
     verdict = msg.get("skills_verdict") or {}
     failures = msg.get("skills_failures") or []
+    mode = verdict.get("skills_probe_mode") or summary.get("skills_probe_mode", "?")
     header_fail = "FAIL | " if verdict.get("failed") or failures else ""
-    checks = []
-    for key, label in [
-        ("accepts_skills", "accepts_skills"),
-        ("bundled_skill_valid", "bundled_skill_valid"),
-    ]:
-        val = verdict.get(key)
-        checks.append(f"{label} {'OK' if val else 'FAIL'}")
+    checks = [f"mode={mode}", f"bundled_skill_valid {'OK' if verdict.get('bundled_skill_valid') else 'FAIL'}"]
+    if mode == "catalog_tool":
+        cl = verdict.get("called_load_skill")
+        checks.append(f"called_load_skill {'OK' if cl else 'FAIL'}")
+        lr = verdict.get("load_skill_result_ok")
+        checks.append(f"load_skill_result_ok {'OK' if lr else 'FAIL'}")
     ref = verdict.get("referenced_mock_skill")
     checks.append(f"referenced_mock_skill {'OK' if ref else 'heuristic FAIL'}")
     with st.expander("Skills trace"):
         st.markdown(f"**{header_fail}**" + " | ".join(checks))
         for note in verdict.get("notes") or []:
             st.caption(note)
-        for rnd in trace:
-            rn = rnd.get("round", "?")
-            with st.expander(f"Round {rn}"):
-                for rf in rnd.get("round_failures") or []:
-                    st.error(rf.get("message", rf))
-                if rnd.get("error_response") is not None:
-                    st.markdown("**error_response**")
-                    st.json(rnd["error_response"])
-                st.markdown("**request**")
-                st.json(rnd.get("request"))
-                st.markdown("**response**")
-                st.json(rnd.get("response"))
-
-
-def run_skills_chat(
-    client, api_messages, model, temperature, max_tokens, stats, status=None
-):
-    skills_failures = []
-    skills_trace = []
-    final_content = None
-
-    if not BUNDLED_SKILL_VALID:
-        err = BUNDLED_SKILL_INIT_ERROR or "Invalid bundled SKILL.md"
-        add_failure(skills_failures, 0, "bundled_skill_invalid", err)
-        verdict = compute_skills_verdict([], skills_failures, None)
-        return None, skills_trace, verdict, skills_failures, stats
-
-    messages = list(api_messages)
-    request_snapshot = build_skills_request_snapshot(
-        messages, model, temperature, max_tokens, False, True
-    )
-    round_failures = []
-    t_start = time.time()
-
-    if status:
-        status.update(label="Skills probe: calling API...")
-
-    extra = probe_extra_body(True)
-    try:
-        completion = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            extra_body=extra,
-        )
-    except Exception as e:
-        body = getattr(e, "body", None)
-        err_msg = f"API error (round 1): {type(e).__name__}: {e}"
-        add_failure(skills_failures, 1, "api_error", err_msg)
-        round_failures.append({"kind": "api_error", "message": err_msg})
-        skills_trace.append({
-            "round": 1,
-            "request": request_snapshot,
-            "response": None,
-            "round_failures": round_failures,
-            "error_response": body,
-        })
-        verdict = compute_skills_verdict(skills_trace, skills_failures, None)
-        return None, skills_trace, verdict, skills_failures, stats
-
-    elapsed = time.time() - t_start
-
-    if not completion.choices:
-        err_msg = "Unexpected response: no choices in completion"
-        add_failure(skills_failures, 1, "empty_response", err_msg)
-        round_failures.append({"kind": "empty_response", "message": err_msg})
-        skills_trace.append({
-            "round": 1,
-            "request": request_snapshot,
-            "response": {"finish_reason": None, "message": None, "elapsed_s": round(elapsed, 3)},
-            "round_failures": round_failures,
-        })
-        verdict = compute_skills_verdict(skills_trace, skills_failures, None)
-        return None, skills_trace, verdict, skills_failures, stats
-
-    choice = completion.choices[0]
-    msg = choice.message
-    assistant_dict = message_to_dict(msg)
-    response_snapshot = {
-        "id": completion.id,
-        "model": completion.model,
-        "finish_reason": choice.finish_reason,
-        "message": assistant_dict,
-        "usage": usage_to_dict(completion.usage),
-        "elapsed_s": round(elapsed, 3),
-    }
-
-    if msg.content:
-        final_content = msg.content
-        if not referenced_marker(final_content):
-            warn_msg = "Model replied with text only; no [MOCK_SKILL:mock-ping] marker"
-            add_failure(skills_failures, 0, "skills_ignored", warn_msg)
-    else:
-        err_msg = (
-            f"Unexpected response: empty assistant message "
-            f"(finish_reason={choice.finish_reason})"
-        )
-        add_failure(skills_failures, 1, "stuck_no_content", err_msg)
-        round_failures.append({"kind": "stuck_no_content", "message": err_msg})
-
-    skills_trace.append({
-        "round": 1,
-        "request": request_snapshot,
-        "response": response_snapshot,
-        "round_failures": round_failures,
-    })
-
-    verdict = compute_skills_verdict(skills_trace, skills_failures, final_content)
-    stats["resp_id"] = completion.id
-    stats["resp_model"] = completion.model
-    stats["finish_reason"] = choice.finish_reason
-    stats["usage"] = usage_to_dict(completion.usage)
-    stats["total_time"] = round(elapsed, 3)
-    return final_content, skills_trace, verdict, skills_failures, stats
+        st.json(summary)
+        if msg.get("tool_trace"):
+            st.caption("Full per-round payloads are in Tool trace below.")
 
 
 def render_assistant_bubble(msg):
     for f in msg.get("skills_failures") or []:
-        if f.get("kind") == "skills_ignored":
+        if f.get("kind") == "skill_not_applied":
             st.warning(f["message"])
         else:
             st.error(f["message"])
@@ -582,7 +536,15 @@ def render_tool_trace(msg):
 
 
 def run_tool_chat(
-    client, api_messages, model, temperature, max_tokens, stats, status=None, probe_skills=False
+    client,
+    api_messages,
+    model,
+    temperature,
+    max_tokens,
+    stats,
+    tools,
+    status=None,
+    effective_system_prompt=None,
 ):
     tool_trace = []
     tool_failures = []
@@ -590,13 +552,20 @@ def run_tool_chat(
     final_content = None
     tool_results_sent = False
     last_completion = None
+    allowed_tool_names = tool_names_from_tools(tools) if tools else frozenset()
 
     for round_num in range(1, MAX_TOOL_ROUNDS + 1):
-        request_snapshot = build_skills_request_snapshot(
-            messages, model, temperature, max_tokens, True, probe_skills
-        )
-        request_snapshot["tools"] = MOCK_TOOLS
-        request_snapshot["tool_choice"] = "auto"
+        request_snapshot = {
+            "messages": json.loads(json.dumps(messages)),
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            request_snapshot["tools"] = tools
+            request_snapshot["tool_choice"] = "auto"
+        if round_num == 1 and effective_system_prompt is not None:
+            request_snapshot["effective_system_prompt"] = effective_system_prompt
         round_failures = []
         t_start = time.time()
 
@@ -606,14 +575,12 @@ def run_tool_chat(
         create_kw = {
             "model": model,
             "messages": messages,
-            "tools": MOCK_TOOLS,
-            "tool_choice": "auto",
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        extra = probe_extra_body(probe_skills)
-        if extra:
-            create_kw["extra_body"] = extra
+        if tools:
+            create_kw["tools"] = tools
+            create_kw["tool_choice"] = "auto"
         try:
             completion = client.chat.completions.create(**create_kw)
         except Exception as e:
@@ -672,10 +639,11 @@ def run_tool_chat(
                     malformed.append("tool_call missing id or function.name")
                     continue
                 name = tc.function.name
-                if name not in MOCK_TOOL_NAMES:
+                if name not in allowed_tool_names:
+                    expected = ", ".join(sorted(allowed_tool_names))
                     err_msg = (
                         f'Unknown tool "{name}" (round {round_num}); '
-                        f"expected read_file or execute_shell"
+                        f"expected one of: {expected}"
                     )
                     add_failure(tool_failures, round_num, "unknown_tool", err_msg)
                     round_failures.append({"kind": "unknown_tool", "message": err_msg})
@@ -751,13 +719,19 @@ def run_tool_chat(
         })
         break
 
-    if final_content and not any(
-        (r.get("response") or {}).get("message", {}).get("tool_calls") for r in tool_trace
+    if (
+        tools
+        and final_content
+        and not any(
+            (r.get("response") or {}).get("message", {}).get("tool_calls") for r in tool_trace
+        )
     ):
         warn_msg = "Model replied with text only; no tool_calls"
         add_failure(tool_failures, 0, "tools_ignored", warn_msg)
 
-    tool_verdict = compute_tool_verdict(tool_trace, tool_failures, final_content)
+    tool_verdict = compute_tool_verdict(
+        tool_trace, tool_failures, final_content, allowed_tool_names
+    )
 
     if last_completion:
         stats["resp_id"] = last_completion.id
@@ -832,8 +806,18 @@ with st.sidebar:
     enable_mock_skills = st.checkbox(
         "Enable mock skills",
         value=False,
-        help="Bundled SKILL.md sent via extra_body.skills. Nothing loaded from disk.",
+        help="Bundled SKILL.md in system and/or load_skill tool. Nothing loaded from disk.",
     )
+    skills_probe_mode = "catalog_tool"
+    if enable_mock_skills:
+        skills_probe_mode = st.radio(
+            "Skills load mode",
+            list(SKILL_PROBE_MODES),
+            format_func=lambda m: (
+                "Catalog + load_skill" if m == "catalog_tool" else "Full skill in system"
+            ),
+            key="skills_probe_mode",
+        )
     if enable_mock_tools:
         st.caption("Tools are fake; nothing runs on the host.")
     if enable_mock_skills:
@@ -843,9 +827,15 @@ with st.sidebar:
             if enable_mock_tools:
                 st.markdown("**Tools**")
                 st.code(TOOL_TEST_PROMPT, language=None)
+                if st.button("Send test prompt", key="send_tools_test", use_container_width=True):
+                    st.session_state.pending_prompt = TOOL_TEST_PROMPT
+                    st.rerun()
             if enable_mock_skills:
                 st.markdown("**Skills**")
                 st.code(SKILLS_TEST_PROMPT, language=None)
+                if st.button("Send test prompt", key="send_skills_test", use_container_width=True):
+                    st.session_state.pending_prompt = SKILLS_TEST_PROMPT
+                    st.rerun()
 
     st.divider()
     st.subheader("Streaming test")
@@ -894,7 +884,8 @@ def render_details(stats):
                 "messages_in_context": stats.get("req_message_count"),
                 "mock_tools": stats.get("mock_tools"),
                 "mock_skills": stats.get("mock_skills"),
-                "extra_body_keys": stats.get("extra_body_keys"),
+                "skills_probe_mode": stats.get("skills_probe_mode"),
+                "req_system_prompt_effective": stats.get("req_system_prompt_effective"),
                 "stream_test": stats.get("stream_test"),
             })
         with col2:
@@ -1016,7 +1007,13 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    api_messages = build_api_messages(st.session_state.messages, system_prompt)
+    probe_mode = skills_probe_mode if enable_mock_skills else "catalog_tool"
+    effective_sys = (
+        build_effective_system_prompt(system_prompt, probe_mode)
+        if enable_mock_skills
+        else system_prompt
+    )
+    api_messages = build_api_messages(st.session_state.messages, effective_sys)
 
     client = openai.OpenAI(base_url=base_url, api_key=api_key or "none")
 
@@ -1026,43 +1023,53 @@ if prompt:
         "req_temperature": temperature,
         "req_max_tokens": max_tokens,
         "req_system_prompt": system_prompt or None,
+        "req_system_prompt_effective": effective_sys if enable_mock_skills else None,
         "req_message_count": len(api_messages),
         "mock_tools": enable_mock_tools,
         "mock_skills": enable_mock_skills,
-        "extra_body_keys": ["skills"] if enable_mock_skills else None,
+        "skills_probe_mode": probe_mode if enable_mock_skills else None,
     }
 
-    if enable_mock_tools:
-        status_label = "Agent probe..." if enable_mock_skills else "Tool calling..."
+    if enable_mock_tools or enable_mock_skills:
+        probe_tools = get_probe_tools(enable_mock_tools, enable_mock_skills, probe_mode)
+        status_label = "Agent probe..."
         with st.chat_message("assistant"):
             final_content = None
             tool_trace = []
             tool_verdict = {}
             tool_failures = []
-            skills_trace = []
+            skills_trace = {}
             skills_verdict = {}
             skills_failures = []
             with st.status(status_label, expanded=True) as status:
                 try:
                     final_content, tool_trace, tool_verdict, tool_failures, stats = run_tool_chat(
                         client, api_messages, model, temperature, max_tokens, stats,
-                        status=status, probe_skills=enable_mock_skills,
+                        tools=probe_tools,
+                        status=status,
+                        effective_system_prompt=effective_sys if enable_mock_skills else None,
                     )
                     if enable_mock_skills:
-                        skills_trace, skills_verdict, skills_failures = (
-                            build_skills_probe_from_tool_run(
-                                tool_trace, final_content, tool_failures
-                            )
+                        skills_trace, skills_verdict, skills_failures = build_skills_summary(
+                            tool_trace,
+                            effective_sys,
+                            probe_mode,
+                            skills_failures,
+                            final_content,
+                            probe_tools,
                         )
                     status.update(label="Probe finished", state="complete")
                 except Exception as e:
                     status.update(label="Probe failed", state="error")
                     add_failure(tool_failures, 0, "api_error", f"Error: {e}")
                     if enable_mock_skills:
-                        skills_trace, skills_verdict, skills_failures = (
-                            build_skills_probe_from_tool_run(
-                                tool_trace, final_content, tool_failures
-                            )
+                        skills_trace, skills_verdict, skills_failures = build_skills_summary(
+                            tool_trace,
+                            effective_sys,
+                            probe_mode,
+                            skills_failures,
+                            final_content,
+                            probe_tools,
                         )
             bubble = {
                 "content": final_content,
@@ -1076,8 +1083,9 @@ if prompt:
                     "tool_verdict": tool_verdict,
                     "tool_failures": tool_failures,
                 })
-            if skills_trace:
+            if enable_mock_skills and skills_trace:
                 render_skills_trace({
+                    "tool_trace": tool_trace,
                     "skills_trace": skills_trace,
                     "skills_verdict": skills_verdict,
                     "skills_failures": skills_failures,
@@ -1096,44 +1104,6 @@ if prompt:
             msg_entry["skills_verdict"] = skills_verdict
             msg_entry["skills_failures"] = skills_failures
         st.session_state.messages.append(msg_entry)
-        render_details(stats)
-    elif enable_mock_skills:
-        with st.chat_message("assistant"):
-            final_content = None
-            skills_trace = []
-            skills_verdict = {}
-            skills_failures = []
-            with st.status("Skills probe...", expanded=True) as status:
-                try:
-                    final_content, skills_trace, skills_verdict, skills_failures, stats = (
-                        run_skills_chat(
-                            client, api_messages, model, temperature, max_tokens, stats,
-                            status=status,
-                        )
-                    )
-                    status.update(label="Skills probe finished", state="complete")
-                except Exception as e:
-                    status.update(label="Skills probe failed", state="error")
-                    add_failure(skills_failures, 0, "api_error", f"Error: {e}")
-            render_assistant_bubble({
-                "content": final_content,
-                "skills_failures": skills_failures,
-            })
-            if skills_trace:
-                render_skills_trace({
-                    "skills_trace": skills_trace,
-                    "skills_verdict": skills_verdict,
-                    "skills_failures": skills_failures,
-                })
-
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": final_content,
-            "stats": stats,
-            "skills_trace": skills_trace,
-            "skills_verdict": skills_verdict,
-            "skills_failures": skills_failures,
-        })
         render_details(stats)
     else:
         stream_failures = []
