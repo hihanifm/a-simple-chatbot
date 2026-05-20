@@ -1,0 +1,127 @@
+"""
+Office implementation template for the internal lab LLM (non-OpenAI API).
+
+Copy this file to lab_adapter.py at the office and implement with your internal
+coding agent. Do not commit lab_adapter.py if it must not leave the lab.
+
+Reference (OpenAI-compatible over httpx, for learning / local test):
+  See lab_adapter_openai_reference.py
+  Enable: LAB_ADAPTER_FLAVOR=openai_compat  (uses sidebar Base URL + LAB_OPENAI_API_KEY)
+
+Checklist (give your agent this file + internal API docs):
+  - Base URL from sidebar / LAB_LLM_URL env
+  - build_headers(): custom auth headers (not Bearer API key in Streamlit)
+  - Chat endpoint path, HTTP method, request/response JSON
+  - list_models() if the API exposes models; else return [] and use manual model name
+  - chat_complete(): full httpx round-trip, map response to OpenAI-shaped completion
+  - iter_chat_stream(): full round-trip if streaming exists; else set capabilities["stream"]=False
+  - tools_to_native() / native_to_tool_calls() only if the API supports tools
+  - Set capabilities truthfully; set REDACT_HEADER_NAMES for sensitive headers
+  - Attach raw_request / raw_response on ChatCompleteResult for API trace debugging
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any, Iterator, Optional
+
+import httpx
+
+from llm_client import (
+    DEFAULT_LAB_STUB_CAPABILITIES,
+    ChatCompleteResult,
+    LLMClient,
+    redact_headers,
+    usage_to_dict,
+)
+
+# Headers to redact in API trace (use your real header names)
+REDACT_HEADER_NAMES = frozenset({
+    "X-Your-Internal-Header",
+})
+
+# Set each flag True only after you implement and test that feature
+capabilities = {
+    "list_models": False,
+    "stream": False,
+    "tools": False,
+}
+
+
+class LabAdapter(LLMClient):
+    adapter_kind = "lab"
+    capabilities = capabilities
+
+    def __init__(self, base_url: str):
+        self.base_url = base_url.rstrip("/")
+
+    def build_headers(self) -> dict[str, str]:
+        """Custom lab auth headers. Read secrets from env, not Streamlit."""
+        return {
+            # "X-Your-Internal-Header": os.environ.get("LAB_LLM_SOMETHING", ""),
+        }
+
+    def list_models(self) -> list[str]:
+        raise NotImplementedError("Implement list_models() or set capabilities['list_models']=False")
+
+    def _build_request_body(
+        self,
+        messages: list,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        tools: Optional[list] = None,
+    ) -> dict:
+        raise NotImplementedError("Map api_messages to your native JSON body")
+
+    def _parse_completion(self, data: dict) -> Any:
+        """Return an object with .id, .model, .choices[0].message, .usage like OpenAI SDK."""
+        raise NotImplementedError("Map native response JSON to completion object")
+
+    def chat_complete(
+        self,
+        *,
+        model: str,
+        messages: list,
+        temperature: float,
+        max_tokens: int,
+        tools: Optional[list] = None,
+        tool_choice: Optional[str] = None,
+    ) -> ChatCompleteResult:
+        headers = self.build_headers()
+        body = self._build_request_body(messages, model, temperature, max_tokens, tools)
+        url = f"{self.base_url}/TODO/chat"  # your path
+        raw_request = {
+            "method": "POST",
+            "url": url,
+            "headers": redact_headers(headers, REDACT_HEADER_NAMES),
+            "body": body,
+        }
+        with httpx.Client(timeout=120.0) as http:
+            resp = http.post(url, headers=headers, json=body)
+        raw_response = {
+            "status_code": resp.status_code,
+            "headers": dict(resp.headers),
+            "body": resp.text[:50000] if resp.text else None,
+        }
+        resp.raise_for_status()
+        data = resp.json()
+        completion = self._parse_completion(data)
+        return ChatCompleteResult(
+            completion=completion,
+            raw_request=raw_request,
+            raw_response=raw_response,
+        )
+
+    def iter_chat_stream(
+        self,
+        *,
+        model: str,
+        messages: list,
+        temperature: float,
+        max_tokens: int,
+        stats: dict,
+        trace: Optional[list] = None,
+        max_trace_samples: int = 5,
+    ) -> Iterator[str]:
+        raise NotImplementedError("Implement streaming or set capabilities['stream']=False")

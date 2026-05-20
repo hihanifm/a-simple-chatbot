@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single-file Streamlit chatbot for testing OpenAI-compatible LLM backends — Ollama, an internal server, or OpenAI itself. All logic lives in `app.py`.
+A Streamlit chatbot for testing LLM backends: OpenAI-compatible providers (Ollama, Internal, OpenAI) via `llm_client.OpenAIAdapter`, plus **Lab (custom API)** for a non-OpenAI internal lab server via `lab_adapter.py` (implemented at the office).
 
 ## Running locally (no Docker)
 
@@ -24,17 +24,25 @@ make logs                # tail logs (prints the URL as a reminder)
 
 `make` alone prints all available targets.
 
-## app.py architecture
+## Architecture
 
-All code is in one file. Key sections:
+- **`app.py`** — Streamlit UI, probes, API trace, message history.
+- **`llm_client.py`** — `make_llm_client()`, `OpenAIAdapter`, `redact_headers()`, `ChatCompleteResult`.
+- **`lab_stub.py`** — used when `lab_adapter.py` is missing (NotImplementedError with setup instructions).
+- **`lab_adapter.py.example`** — office template; copy to `lab_adapter.py` at the lab (not committed here if sensitive).
+- **`lab_adapter_openai_reference.py`** — working reference flavor: same OpenAI `/v1` API over httpx with **raw_request** / **raw_response** in trace. Set `LAB_ADAPTER_FLAVOR=openai_compat`, point Lab Base URL at Ollama/Internal (e.g. `http://host.docker.internal:11434/v1`), optional `LAB_OPENAI_API_KEY=ollama`.
 
-- **`BACKENDS` dict** — default URL, model, and API key per provider. Internal URL falls back to `http://host.docker.internal:35700/v1` if `INTERNAL_LLM_URL` env var is unset or empty (use `or`, not `get()` default, because docker-compose sets it to empty string).
-- **Sidebar** — provider selectbox, base URL / API key inputs, "Fetch available models" button, request params (temperature, max_tokens, system prompt), clear chat. Switching provider auto-fetches models via `/v1/models` and clears prior model selection; `_last_backend` in session state tracks the current provider.
-- **`stream_response()` generator** — wraps `openai.OpenAI(base_url=...).chat.completions.create(stream=True)`. Captures TTFT, finish_reason, usage (via `stream_options={"include_usage": True}`), response id/model into a mutable `stats` dict passed by reference. Optional `trace` records up to 5 sample chunks and a `stream_trace_summary` on `stats`.
+Key sections in `app.py`:
+
+- **`BACKENDS` dict** — `adapter`: `openai` or `lab`, default URL/model/key. Internal URL falls back to `http://host.docker.internal:35700/v1` if `INTERNAL_LLM_URL` is unset or empty (use `or`, not `get()`). Lab URL uses `LAB_LLM_URL` or `http://host.docker.internal:8080`.
+- **Sidebar** — provider selectbox, base URL, API key (hidden for Lab; auth in `lab_adapter.build_headers()`). Capabilities from the client gate model fetch, streaming, and mock probes. Switching provider auto-fetches models when `list_models` is supported.
+- **`make_llm_client()`** — returns `OpenAIAdapter` or `LabAdapter` / `LabAdapterStub`.
+- **`stream_response()`** — delegates to `client.iter_chat_stream()`. Captures TTFT, finish_reason, usage into `stats`.
 - **Streaming display** — uses `st.empty()` placeholder showing `_Thinking..._` until first token arrives, then appends tokens with `|` cursor manually. Do NOT use `st.write_stream()` (no pre-stream placeholder) or `st.spinner()` inside `st.chat_message` — spinner disrupts the bubble context and causes assistant messages to disappear from history replay.
-- **Streaming test** — sidebar `Test streaming` toggle (disabled when mock tools or mock skills on). Instruments the normal stream path with `stream_verdict` and `stream_trace_summary` stored on `stats` for the assistant message; verdict line shown in **Details** on replay.
+- **Streaming** — sidebar `Stream responses` checkbox under Request params (default on; disabled when mock probes are on). On: token-by-token via `stream_response()`. Off: single blocking completion via `blocking_chat_response()`.
 - **Mock probes (tools/skills)** — when the sidebar system prompt is empty, requests use `PROBE_BASE_SYSTEM_PROMPT` (debugging assistant persona) so the API always gets a real `system` message plus the user turn. Mock skills adds a catalog or full SKILL.md appendix via `build_effective_system_prompt()`. Two skill modes: **Catalog + load_skill** or **Full skill in system**. Uses `run_tool_chat` with mock tools and/or `load_skill`. Skills test prompt: `Hey, how do I ping?`
-- **API trace** — every assistant turn stores per-round **request** / **response** JSON (and **tool_results** / **stream_trace_summary** when relevant) in an **API trace** expander. Mock probes use `tool_trace`; normal streaming chat uses `api_trace` from `build_chat_api_trace()`. Stream-test verdict line appears in the trace header when enabled. No separate Details panel.
+- **API trace** — per-round **request** / **response** JSON (and **tool_results** / **stream_trace_summary** when relevant). Lab adapter adds **raw_request** / **raw_response** (redacted headers) for debugging the native HTTP API.
+- **Office handoff** — implement `lab_adapter.py` from `lab_adapter.py.example` with your internal coding agent; set `capabilities` and `REDACT_HEADER_NAMES`; test with API trace raw panels.
 - **`session_state.messages`** — list of `{role, content, stats}` dicts. `stats` is only present on assistant messages. System prompt is prepended to `api_messages` at send time but not stored in history.
 
 ## Editing caution
@@ -50,7 +58,7 @@ All code is in one file. Key sections:
 | dev     | 8601      |
 | prod    | 8600      |
 
-Both map to container port `8501`. `extra_hosts: host-gateway` lets containers reach host services via `host.docker.internal` on both Mac and Linux. `INTERNAL_LLM_URL` defaults to `http://host.docker.internal:35700/v1` in docker-compose if not set in the environment.
+Both map to container port `8501`. `extra_hosts: host-gateway` lets containers reach host services via `host.docker.internal` on both Mac and Linux. `INTERNAL_LLM_URL` and `LAB_LLM_URL` are set in docker-compose when not in the environment. Dev compose mounts `app.py`, `llm_client.py`, and `lab_stub.py`.
 
 ## pip-cache
 

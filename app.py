@@ -2,22 +2,32 @@ import json
 import os
 import time
 import streamlit as st
-import openai
+
+from llm_client import make_llm_client
 
 BACKENDS = {
     "Ollama": {
+        "adapter": "openai",
         "default_url": "http://host.docker.internal:11434/v1",
         "default_model": "llama3",
         "default_key": "ollama",
     },
     "Internal": {
+        "adapter": "openai",
         "default_url": os.environ.get("INTERNAL_LLM_URL") or "http://host.docker.internal:35700/v1",
         "default_model": "",
         "default_key": "",
     },
     "OpenAI": {
+        "adapter": "openai",
         "default_url": "https://api.openai.com/v1",
         "default_model": "gpt-4o-mini",
+        "default_key": "",
+    },
+    "Lab (custom API)": {
+        "adapter": "lab",
+        "default_url": os.environ.get("LAB_LLM_URL") or "http://host.docker.internal:8080",
+        "default_model": "",
         "default_key": "",
     },
 }
@@ -58,7 +68,6 @@ TOOL_TEST_PROMPT = (
     "You have read_file and execute_shell. Read /tmp/config.txt, run uname -a, "
     "then summarize what you found in one paragraph."
 )
-STREAM_TEST_PROMPT = "Tell me a story."
 PROBE_BASE_SYSTEM_PROMPT = (
     "You are a debugging and analysis assistant. Help the user investigate "
     "issues clearly and follow any loaded agent skills."
@@ -100,7 +109,35 @@ CURSOR = "|"
 VERSION = open(os.path.join(os.path.dirname(__file__), "VERSION")).read().strip()
 
 st.set_page_config(page_title="LLM Chatbot", page_icon="💬")
-st.title("LLM Chatbot")
+
+st.markdown(
+    """
+<style>
+button[data-testid="stBaseButton-clear_chat"],
+button[data-testid="baseButton-clear_chat"] {
+    background: linear-gradient(180deg, #f4a261 0%, #e76f51 100%) !important;
+    color: #fff !important;
+    border: 1px solid #c96a32 !important;
+    font-weight: 600 !important;
+}
+button[data-testid="stBaseButton-clear_chat"]:hover,
+button[data-testid="baseButton-clear_chat"]:hover {
+    background: linear-gradient(180deg, #e76f51 0%, #d45d3e 100%) !important;
+    border-color: #a85a28 !important;
+    color: #fff !important;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+_header_left, _header_right = st.columns([5, 1], vertical_alignment="center")
+with _header_left:
+    st.title("LLM Chatbot")
+with _header_right:
+    if st.button("Clear chat", key="clear_chat", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
 
 
 def mock_tool_handler(name, arguments_str):
@@ -151,6 +188,20 @@ def usage_to_dict(usage):
         "completion_tokens": usage.completion_tokens,
         "total_tokens": usage.total_tokens,
     }
+
+
+def api_error_body(exc):
+    body = getattr(exc, "body", None)
+    if body is not None:
+        return body
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return None
+    try:
+        return resp.json()
+    except Exception:
+        text = getattr(resp, "text", None) or str(resp)
+        return {"text": text[:5000]}
 
 
 def add_failure(failures, round_num, kind, message):
@@ -389,42 +440,6 @@ def compute_tool_verdict(tool_trace, tool_failures, final_content, allowed_tool_
     }
 
 
-def compute_stream_verdict(stream_failures, stats, summary, response_text):
-    api_error = any(f["kind"] == "api_error" for f in stream_failures)
-    content_chunks = (summary or {}).get("content_chunks", 0)
-    received_content = content_chunks > 0 or bool(response_text)
-    got_finish_reason = bool(stats.get("finish_reason"))
-    usage_reported = bool(stats.get("usage"))
-    accepts_stream = not api_error
-    failed = bool(stream_failures) or not (
-        accepts_stream and received_content and got_finish_reason
-    )
-    notes = [f["message"] for f in stream_failures]
-    return {
-        "accepts_stream": accepts_stream,
-        "received_content": received_content,
-        "got_finish_reason": got_finish_reason,
-        "usage_reported": usage_reported,
-        "notes": notes,
-        "failed": failed,
-    }
-
-
-def format_stream_verdict_line(verdict):
-    header = "FAIL" if verdict.get("failed") else "PASS"
-    checks = []
-    for key, label in [
-        ("accepts_stream", "accepts_stream"),
-        ("received_content", "received_content"),
-        ("got_finish_reason", "got_finish_reason"),
-    ]:
-        val = verdict.get(key)
-        checks.append(f"{label} {'OK' if val else 'FAIL'}")
-    ref = verdict.get("usage_reported")
-    checks.append(f"usage_reported {'OK' if ref else 'heuristic FAIL'}")
-    return f"Stream check: {header} | " + " | ".join(checks)
-
-
 def build_api_messages(session_messages, system_prompt):
     api_messages = []
     if system_prompt:
@@ -509,23 +524,28 @@ def build_chat_api_trace(
     stats,
     content,
     failures=None,
+    use_stream=True,
     stream_summary=None,
     error_response=None,
+    raw_request=None,
+    raw_response=None,
 ):
     round_failures = [
         {"kind": f.get("kind"), "message": f.get("message")}
         for f in (failures or [])
     ]
+    request = {
+        "messages": json.loads(json.dumps(request_messages)),
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": use_stream,
+    }
+    if use_stream:
+        request["stream_options"] = {"include_usage": True}
     entry = {
         "round": 1,
-        "request": {
-            "messages": json.loads(json.dumps(request_messages)),
-            "model": model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        },
+        "request": request,
         "round_failures": round_failures,
     }
     if error_response is not None:
@@ -543,6 +563,10 @@ def build_chat_api_trace(
         }
     if stream_summary:
         entry["stream_trace_summary"] = stream_summary
+    if raw_request is not None:
+        entry["raw_request"] = raw_request
+    if raw_response is not None:
+        entry["raw_response"] = raw_response
     return [entry]
 
 
@@ -568,9 +592,6 @@ def render_api_trace(msg):
         checks.append(f"referenced_mock_data {'OK' if ref else 'heuristic FAIL'}")
         header = f"**{header_fail}**" + " | ".join(checks)
         notes = verdict.get("notes") or []
-    elif stats.get("stream_verdict"):
-        header = f"**{format_stream_verdict_line(stats['stream_verdict'])}**"
-        notes = stats["stream_verdict"].get("notes") or []
     else:
         rnd = trace[0] if trace else {}
         resp = rnd.get("response") or {}
@@ -608,6 +629,12 @@ def render_api_trace(msg):
                 if rnd.get("stream_trace_summary") is not None:
                     st.markdown("**stream_trace_summary**")
                     st.json(rnd.get("stream_trace_summary"))
+                if rnd.get("raw_request") is not None:
+                    st.markdown("**raw_request**")
+                    st.json(rnd.get("raw_request"))
+                if rnd.get("raw_response") is not None:
+                    st.markdown("**raw_response**")
+                    st.json(rnd.get("raw_response"))
 
 
 def run_tool_chat(
@@ -647,33 +674,33 @@ def run_tool_chat(
         if status:
             status.update(label=f"Round {round_num}: calling API...")
 
-        create_kw = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        if tools:
-            create_kw["tools"] = tools
-            create_kw["tool_choice"] = "auto"
         try:
-            completion = client.chat.completions.create(**create_kw)
+            result = client.chat_complete(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools if tools else None,
+                tool_choice="auto" if tools else None,
+            )
         except Exception as e:
-            body = getattr(e, "body", None)
+            body = api_error_body(e)
             err_msg = f"API error (round {round_num}): {type(e).__name__}: {e}"
             add_failure(tool_failures, round_num, "api_error", err_msg)
             round_failures.append({"kind": "api_error", "message": err_msg})
-            tool_trace.append({
+            err_round = {
                 "round": round_num,
                 "request": request_snapshot,
                 "response": None,
                 "tool_results": [],
                 "round_failures": round_failures,
                 "error_response": body,
-            })
+            }
+            tool_trace.append(err_round)
             break
 
         elapsed = time.time() - t_start
+        completion = result.completion
         last_completion = completion
 
         if not completion.choices:
@@ -754,13 +781,18 @@ def run_tool_chat(
                 })
             tool_results_sent = True
 
-            tool_trace.append({
+            round_entry = {
                 "round": round_num,
                 "request": request_snapshot,
                 "response": response_snapshot,
                 "tool_results": tool_results,
                 "round_failures": round_failures,
-            })
+            }
+            if result.raw_request:
+                round_entry["raw_request"] = result.raw_request
+            if result.raw_response:
+                round_entry["raw_response"] = result.raw_response
+            tool_trace.append(round_entry)
 
             if round_num >= MAX_TOOL_ROUNDS:
                 err_msg = "Stopped: model kept requesting tools after 3 rounds"
@@ -770,13 +802,18 @@ def run_tool_chat(
 
         if msg.content:
             final_content = msg.content
-            tool_trace.append({
+            round_entry = {
                 "round": round_num,
                 "request": request_snapshot,
                 "response": response_snapshot,
                 "tool_results": [],
                 "round_failures": round_failures,
-            })
+            }
+            if result.raw_request:
+                round_entry["raw_request"] = result.raw_request
+            if result.raw_response:
+                round_entry["raw_response"] = result.raw_response
+            tool_trace.append(round_entry)
             break
 
         err_msg = (
@@ -785,13 +822,18 @@ def run_tool_chat(
         )
         add_failure(tool_failures, round_num, "stuck_no_content", err_msg)
         round_failures.append({"kind": "stuck_no_content", "message": err_msg})
-        tool_trace.append({
+        round_entry = {
             "round": round_num,
             "request": request_snapshot,
             "response": response_snapshot,
             "tool_results": [],
             "round_failures": round_failures,
-        })
+        }
+        if result.raw_request:
+            round_entry["raw_request"] = result.raw_request
+        if result.raw_response:
+            round_entry["raw_response"] = result.raw_response
+        tool_trace.append(round_entry)
         break
 
     if (
@@ -827,34 +869,63 @@ with st.sidebar:
     st.header("Backend")
     backend = st.selectbox("Provider", list(BACKENDS.keys()))
     cfg = BACKENDS[backend]
+    _is_lab = cfg.get("adapter") == "lab"
 
     if st.session_state.get("_last_backend") != backend:
         st.session_state.pop("fetched_models", None)
         st.session_state.pop("selected_model", None)
+        st.session_state.pop("_client_caps", None)
         st.session_state["_last_backend"] = backend
         try:
-            _c = openai.OpenAI(base_url=cfg["default_url"], api_key=cfg["default_key"] or "none")
-            st.session_state.fetched_models = sorted(m.id for m in _c.models.list().data)
+            _c = make_llm_client(cfg, cfg["default_url"], cfg["default_key"] or "none")
+            if _c.capabilities.get("list_models", True):
+                st.session_state.fetched_models = _c.list_models()
         except Exception:
             pass
 
     base_url = st.text_input("Base URL", value=cfg["default_url"], key=f"base_url_{backend}")
-    api_key = st.text_input(
-        "API Key", value=cfg["default_key"], type="password",
-        help="Leave as 'ollama' for Ollama, blank if your server needs no key.",
-    )
+    if _is_lab:
+        _lab_flavor = os.environ.get("LAB_ADAPTER_FLAVOR", "").strip()
+        if _lab_flavor == "openai_compat":
+            st.caption(
+                "Reference flavor: OpenAI-compatible HTTP via lab adapter "
+                "(raw API trace). Key from env LAB_OPENAI_API_KEY or below."
+            )
+            api_key = st.text_input(
+                "API Key (openai_compat)",
+                value=os.environ.get("LAB_OPENAI_API_KEY") or "ollama",
+                type="password",
+                key="lab_openai_compat_key",
+            )
+        else:
+            st.caption("Auth is configured in lab_adapter.py (custom headers, not API Key).")
+            api_key = ""
+    else:
+        api_key = st.text_input(
+            "API Key", value=cfg["default_key"], type="password",
+            help="Leave as 'ollama' for Ollama, blank if your server needs no key.",
+        )
 
-    if st.button("Fetch available models", use_container_width=True):
+    try:
+        _sidebar_client = make_llm_client(cfg, base_url, api_key or "none")
+        _client_caps = _sidebar_client.capabilities
+    except Exception:
+        _client_caps = {}
+    st.session_state._client_caps = _client_caps
+
+    _can_list_models = _client_caps.get("list_models", True)
+    if st.button("Fetch available models", use_container_width=True, disabled=not _can_list_models):
         if not base_url:
             st.warning("Enter a Base URL first.")
         else:
             try:
-                _client = openai.OpenAI(base_url=base_url, api_key=api_key or "none")
-                st.session_state.fetched_models = sorted(
-                    m.id for m in _client.models.list().data
-                )
+                _client = make_llm_client(cfg, base_url, api_key or "none")
+                if _client.capabilities.get("list_models", True):
+                    st.session_state.fetched_models = _client.list_models()
             except Exception as e:
                 st.error(f"Could not fetch models: {e}")
+    if not _can_list_models:
+        st.caption("Model list not supported for this provider; enter model name manually.")
 
     fetched = st.session_state.get("fetched_models")
     if fetched:
@@ -869,20 +940,41 @@ with st.sidebar:
     st.subheader("Request params")
     temperature = st.slider("Temperature", 0.0, 2.0, 1.0, step=0.1)
     max_tokens = int(st.number_input("Max tokens", min_value=1, value=2048))
+    _probe_block = (
+        st.session_state.get("enable_mock_tools", False)
+        or st.session_state.get("enable_mock_skills", False)
+    )
+    _can_stream = _client_caps.get("stream", True)
+    enable_streaming = st.checkbox(
+        "Stream responses",
+        value=True,
+        key="enable_streaming",
+        disabled=_probe_block or not _can_stream,
+        help="Off waits for the full reply; on shows tokens as they arrive.",
+    )
+    if not _can_stream and not _probe_block:
+        st.caption("Streaming not supported for this provider adapter.")
     system_prompt = st.text_area("System prompt", placeholder="Optional system message...")
 
     st.divider()
     st.subheader("Agent probes")
+    _can_tools = _client_caps.get("tools", True)
     enable_mock_tools = st.checkbox(
         "Enable mock tools",
         value=False,
+        key="enable_mock_tools",
+        disabled=not _can_tools,
         help="Simulated read_file and execute_shell only. No disk or shell access.",
     )
     enable_mock_skills = st.checkbox(
         "Enable mock skills",
         value=False,
+        key="enable_mock_skills",
+        disabled=not _can_tools,
         help="Bundled SKILL.md in system and/or load_skill tool. Nothing loaded from disk.",
     )
+    if not _can_tools:
+        st.caption("Lab API adapter does not declare tool support.")
     skills_probe_mode = "catalog_tool"
     if enable_mock_skills:
         skills_probe_mode = st.radio(
@@ -915,90 +1007,41 @@ with st.sidebar:
                     st.session_state.pending_prompt = SKILLS_TEST_PROMPT
                     st.rerun()
 
-    st.divider()
-    st.subheader("Streaming test")
-    _stream_test_disabled = enable_mock_tools or enable_mock_skills
-    if st.session_state.pop("_enable_stream_test_for_send", False):
-        st.session_state["enable_stream_test"] = True
-    enable_stream_test = st.checkbox(
-        "Test streaming",
-        value=False,
-        key="enable_stream_test",
-        disabled=_stream_test_disabled,
-        help="Records stream diagnostics on the next message.",
-    )
-    if not _stream_test_disabled:
-        if st.button(
-            "Send test prompt",
-            use_container_width=True,
-            help=f"Enable stream test and send: {STREAM_TEST_PROMPT}",
-        ):
-            st.session_state["_enable_stream_test_for_send"] = True
-            st.session_state.pending_prompt = STREAM_TEST_PROMPT
-            st.rerun()
-
-    st.divider()
-    if st.button("Clear chat"):
-        st.session_state.messages = []
-        st.rerun()
-
-
 def stream_response(client, messages, model, temperature, max_tokens, stats, trace=None):
-    t_start = time.time()
-    first_token = True
-    chunk_count = 0
-    content_chunks = 0
-    samples = []
-    truncated = False
-    with client.chat.completions.create(
+    yield from client.iter_chat_stream(
         model=model,
         messages=messages,
-        stream=True,
-        stream_options={"include_usage": True},
         temperature=temperature,
         max_tokens=max_tokens,
-    ) as stream:
-        for chunk in stream:
-            chunk_count += 1
-            delta_content = None
-            finish_reason = None
-            if chunk.choices:
-                delta_content = chunk.choices[0].delta.content
-                if delta_content:
-                    content_chunks += 1
-                    if first_token:
-                        stats["ttft"] = time.time() - t_start
-                        first_token = False
-                    yield delta_content
-                finish_reason = chunk.choices[0].finish_reason
-                if finish_reason:
-                    stats["finish_reason"] = finish_reason
-            if chunk.usage:
-                stats["usage"] = usage_to_dict(chunk.usage)
-            if chunk.model:
-                stats["resp_model"] = chunk.model
-            if chunk.id:
-                stats["resp_id"] = chunk.id
-            if trace is not None:
-                if len(samples) < MAX_STREAM_TRACE_SAMPLES:
-                    samples.append({
-                        "index": chunk_count,
-                        "id": chunk.id,
-                        "model": chunk.model,
-                        "finish_reason": finish_reason,
-                        "delta_content": delta_content,
-                        "usage": usage_to_dict(chunk.usage) if chunk.usage else None,
-                    })
-                elif not truncated:
-                    truncated = True
-    summary = {
-        "chunk_count": chunk_count,
-        "content_chunks": content_chunks,
-        "truncated": truncated if trace is not None else False,
-        "samples": samples,
-    }
-    stats["stream_trace_summary"] = summary
+        stats=stats,
+        trace=trace,
+        max_trace_samples=MAX_STREAM_TRACE_SAMPLES,
+    )
+
+
+def blocking_chat_response(client, messages, model, temperature, max_tokens, stats):
+    t_start = time.time()
+    result = client.chat_complete(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    if result.raw_request:
+        stats["raw_request"] = result.raw_request
+    if result.raw_response:
+        stats["raw_response"] = result.raw_response
+    completion = result.completion
     stats["total_time"] = time.time() - t_start
+    stats["ttft"] = stats["total_time"]
+    if not completion.choices:
+        return None
+    choice = completion.choices[0]
+    stats["resp_id"] = completion.id
+    stats["resp_model"] = completion.model
+    stats["finish_reason"] = choice.finish_reason
+    stats["usage"] = usage_to_dict(completion.usage)
+    return choice.message.content
 
 
 # --- Chat state ---
@@ -1047,9 +1090,10 @@ if prompt:
         PROBE_BASE_SYSTEM_PROMPT if (enable_mock_skills or enable_mock_tools) else None
     )
 
-    client = openai.OpenAI(base_url=base_url, api_key=api_key or "none")
+    client = make_llm_client(cfg, base_url, api_key or "none")
 
     stats = {
+        "req_adapter": client.adapter_kind,
         "req_base_url": base_url,
         "req_model": model,
         "req_temperature": temperature,
@@ -1062,6 +1106,7 @@ if prompt:
         "mock_tools": enable_mock_tools,
         "mock_skills": enable_mock_skills,
         "skills_probe_mode": probe_mode,
+        "req_stream": enable_streaming,
     }
 
     if enable_mock_tools or enable_mock_skills:
@@ -1140,48 +1185,56 @@ if prompt:
             msg_entry["skills_failures"] = skills_failures
         st.session_state.messages.append(msg_entry)
     else:
-        stream_failures = []
-        trace = [] if enable_stream_test else None
-        if enable_stream_test:
-            stats["stream_test"] = True
+        chat_failures = []
         with st.chat_message("assistant"):
             placeholder = st.empty()
             placeholder.markdown("_Thinking..._")
-            response = ""
+            response = None
             api_trace = None
             try:
-                for token in stream_response(
-                    client, api_messages, model, temperature, max_tokens, stats, trace=trace
-                ):
-                    response += token
-                    placeholder.markdown(response + CURSOR)
-                placeholder.markdown(response)
-                if enable_stream_test:
-                    stats["stream_verdict"] = compute_stream_verdict(
-                        stream_failures,
+                if enable_streaming:
+                    response = ""
+                    for token in stream_response(
+                        client, api_messages, model, temperature, max_tokens, stats
+                    ):
+                        response += token
+                        placeholder.markdown(response + CURSOR)
+                    placeholder.markdown(response)
+                    api_trace = build_chat_api_trace(
+                        api_messages,
+                        model,
+                        temperature,
+                        max_tokens,
                         stats,
-                        stats.get("stream_trace_summary"),
                         response,
+                        failures=chat_failures,
+                        use_stream=True,
+                        stream_summary=stats.get("stream_trace_summary"),
+                        raw_request=stats.get("raw_request"),
+                        raw_response=stats.get("raw_response"),
                     )
-                api_trace = build_chat_api_trace(
-                    api_messages,
-                    model,
-                    temperature,
-                    max_tokens,
-                    stats,
-                    response,
-                    failures=stream_failures,
-                    stream_summary=stats.get("stream_trace_summary"),
-                )
+                else:
+                    response = blocking_chat_response(
+                        client, api_messages, model, temperature, max_tokens, stats
+                    )
+                    placeholder.markdown(response or "")
+                    api_trace = build_chat_api_trace(
+                        api_messages,
+                        model,
+                        temperature,
+                        max_tokens,
+                        stats,
+                        response,
+                        failures=chat_failures,
+                        use_stream=False,
+                        raw_request=stats.get("raw_request"),
+                        raw_response=stats.get("raw_response"),
+                    )
             except Exception as e:
                 placeholder.empty()
                 st.error(f"Error: {e}")
-                body = getattr(e, "body", None)
-                add_failure(stream_failures, 0, "api_error", f"Error: {e}")
-                if enable_stream_test:
-                    stats["stream_verdict"] = compute_stream_verdict(
-                        stream_failures, stats, stats.get("stream_trace_summary"), None
-                    )
+                body = api_error_body(e)
+                add_failure(chat_failures, 0, "api_error", f"Error: {e}")
                 api_trace = build_chat_api_trace(
                     api_messages,
                     model,
@@ -1189,11 +1242,15 @@ if prompt:
                     max_tokens,
                     stats,
                     None,
-                    failures=stream_failures,
-                    stream_summary=stats.get("stream_trace_summary"),
+                    failures=chat_failures,
+                    use_stream=enable_streaming,
+                    stream_summary=stats.get("stream_trace_summary")
+                    if enable_streaming
+                    else None,
                     error_response=body,
+                    raw_request=stats.get("raw_request"),
+                    raw_response=stats.get("raw_response"),
                 )
-                response = None
 
         if response is not None:
             assistant_msg = {
@@ -1202,8 +1259,8 @@ if prompt:
                 "stats": stats,
                 "api_trace": api_trace,
             }
-            if enable_stream_test and stream_failures:
-                assistant_msg["stream_failures"] = stream_failures
+            if chat_failures:
+                assistant_msg["stream_failures"] = chat_failures
             st.session_state.messages.append(assistant_msg)
             render_api_trace(assistant_msg)
         elif api_trace:
@@ -1213,8 +1270,8 @@ if prompt:
                 "stats": stats,
                 "api_trace": api_trace,
             }
-            if stream_failures:
-                err_msg["stream_failures"] = stream_failures
+            if chat_failures:
+                err_msg["stream_failures"] = chat_failures
             st.session_state.messages.append(err_msg)
             render_api_trace(err_msg)
 
