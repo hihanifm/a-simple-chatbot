@@ -10,7 +10,7 @@ services:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-}
         HOST_ARCH: ${BUILD_ARCH:-}
     ports:
-      - "8501:8501"
+      - "8600:8501"
     volumes:
       - ./app.py:/app/app.py:ro
       - ./llm_client.py:/app/llm_client.py:ro

@@ -10,7 +10,7 @@ export BUILD_ARCH
 .PHONY: help up down build rebuild logs restart ps pip-cache clean
 
 help:
-	@echo "  make build && make up   Build image + start at http://localhost:8501"
+	@echo "  make build && make up   Build image + start at http://localhost:8600"
 	@echo "  make rebuild            Full --no-cache rebuild + up"
 	@echo "  make restart            down + up without rebuild"
 	@echo "  make logs               Tail logs"
@@ -38,7 +38,7 @@ restart:
 	docker compose up -d
 
 logs:
-	@echo "  App running at: http://localhost:8501"
+	@echo "  App running at: http://localhost:8600"
 	docker compose logs -f
 
 ps:

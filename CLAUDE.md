@@ -17,7 +17,7 @@ streamlit run app.py
 ## Running with Docker
 
 ```bash
-make build && make up    # http://localhost:8501
+make build && make up    # http://localhost:8600
 make logs                # tail logs (prints the URL as a reminder)
 ```
 
@@ -51,7 +51,7 @@ Key sections in `app.py`:
 
 ## Docker
 
-Host and container both use port `8501`. `extra_hosts: host-gateway` lets the container reach host services via `host.docker.internal` on Mac and Linux. `INTERNAL_LLM_URL` and `LAB_LLM_URL` are set in docker-compose when not in the environment. Compose mounts `app.py`, `llm_client.py`, and `lab_adapter_openai_reference.py` for live edits.
+Docker maps host **8600** to container **8501** (Streamlit inside the image). Local `streamlit run app.py` still uses 8501. `extra_hosts: host-gateway` lets the container reach host services via `host.docker.internal` on Mac and Linux. `INTERNAL_LLM_URL` and `LAB_LLM_URL` are set in docker-compose when not in the environment. Compose mounts `app.py`, `llm_client.py`, and `lab_adapter_openai_reference.py` for live edits.
 
 ## pip-cache
 
